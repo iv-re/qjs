@@ -1,0 +1,56 @@
+{
+  "macos_x64": {
+    "target_os": "macos",
+    "target_cpu": "x64"
+  },
+  "macos_arm64": {
+    "target_os": "macos",
+    "target_cpu": "arm64"
+  },
+  "ios_arm64": {
+    "target_os": "ios",
+    "target_cpu": "arm64"
+  },
+  "ios_sim_arm64": {
+    "target_os": "ios",
+    "target_cpu": "arm64",
+    "ios_use_simulator": true
+  },
+  "ios_sim_x64": {
+    "target_os": "ios",
+    "target_cpu": "x64",
+    "ios_use_simulator": true
+  },
+  "android_arm64": {
+    "target_os": "android",
+    "target_cpu": "arm64"
+  },
+  "android_arm": {
+    "target_os": "android",
+    "target_cpu": "arm"
+  },
+  "android_x64": {
+    "target_os": "android",
+    "target_cpu": "x64"
+  },
+  "android_x86": {
+    "target_os": "android",
+    "target_cpu": "x86"
+  },
+  "linux_x64": {
+    "target_os": "linux",
+    "target_cpu": "x64"
+  },
+  "linux_arm64": {
+    "target_os": "linux",
+    "target_cpu": "arm64"
+  },
+  "windows_x64": {
+    "target_os": "windows",
+    "target_cpu": "x64"
+  },
+  "windows_arm64": {
+    "target_os": "windows",
+    "target_cpu": "arm64"
+  }
+}

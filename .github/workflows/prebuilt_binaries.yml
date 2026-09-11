@@ -1,0 +1,211 @@
+name: Prebuilt Binaries
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "quickjs/**"
+      - "src/**"
+      - "CMakeLists.txt"
+      - "tool/**"
+      - "qjs_hash"
+  workflow_dispatch:
+
+jobs:
+  # Job 1: Generate matrix from build_config.json and check release existence
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      qjs_hash: ${{ steps.read-hash.outputs.hash }}
+      qjs_hash_short: ${{ steps.read-hash.outputs.hash_short }}
+      should_build: ${{ steps.check-release.outputs.should_build }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Verify qjs_hash
+        run: dart tool/build_tool.dart hash --verify || dart tool/build_tool.dart hash
+
+      - name: Read qjs_hash
+        id: read-hash
+        run: |
+          HASH=$(cat qjs_hash)
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "hash_short=${HASH:0:10}" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists
+        id: check-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HASH="${{ steps.read-hash.outputs.hash }}"
+          TAG="qjs_${HASH}"
+          if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release $TAG does not exist, proceeding with build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate matrix from build_config.json
+        id: set-matrix
+        run: |
+          matrix=$(cat tool/build_config.json | jq -c '
+            to_entries | map(select(.value.__ignore__ != true)) | map({
+              config: .key,
+              target_os: .value.target_os,
+              target_cpu: .value.target_cpu,
+              os: (
+                if .value.target_os == "macos" or .value.target_os == "ios" then
+                  "macos-latest"
+                elif .value.target_os == "windows" then
+                  "windows-latest"
+                elif .value.target_os == "linux" then
+                  if .value.target_cpu == "arm64" then
+                    "ubuntu-24.04-arm"
+                  else
+                    "ubuntu-latest"
+                  end
+                elif .value.target_os == "android" then
+                  "ubuntu-latest"
+                else
+                  "ubuntu-latest"
+                end
+              ),
+              lib_name: (
+                if .value.target_os == "macos" or .value.target_os == "ios" then
+                  "libqjs_dart.dylib"
+                elif .value.target_os == "windows" then
+                  "qjs_dart.dll"
+                else
+                  "libqjs_dart.so"
+                end
+              )
+            }) | {include: .}
+          ')
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  # Job 2: Build binary for each configuration in parallel
+  build:
+    needs: generate-matrix
+    if: needs.generate-matrix.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Set Android NDK environment
+        if: matrix.target_os == 'android'
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+
+      - name: Install Linux dependencies (ARM64 cross-compile fallback)
+        if: matrix.target_os == 'linux' && matrix.target_cpu == 'arm64' && runner.arch != 'ARM64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Build binary
+        run: dart tool/build_tool.dart build --config=${{ matrix.config }} -v
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qjs_${{ matrix.config }}
+          path: build_${{ matrix.config }}/**/${{ matrix.lib_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Job 3: Collect all artifacts, compute SHA256, create release and commit hashes
+  release:
+    needs: [generate-matrix, build]
+    if: needs.generate-matrix.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate hashes JSON and prepare release assets
+        run: |
+          mkdir -p release_assets
+          echo "{" > prebuilt_hashes.json
+          first=true
+
+          for config_dir in artifacts/qjs_*/; do
+            if [ -d "$config_dir" ]; then
+              config=$(basename "$config_dir" | sed 's/^qjs_//')
+              lib_file=$(find "$config_dir" -type f \( -name "*.dylib" -o -name "*.so" -o -name "*.dll" \) | head -1)
+              if [ -f "$lib_file" ]; then
+                hash=$(sha256sum "$lib_file" | cut -d ' ' -f 1)
+                lib_name=$(basename "$lib_file")
+                asset_name="${config}_${lib_name}"
+                if [ "$first" = true ]; then
+                  first=false
+                else
+                  echo "," >> prebuilt_hashes.json
+                fi
+                printf '  "%s": "%s"' "$asset_name" "$hash" >> prebuilt_hashes.json
+                cp "$lib_file" "release_assets/$asset_name"
+              fi
+            fi
+          done
+
+          echo "" >> prebuilt_hashes.json
+          echo "}" >> prebuilt_hashes.json
+          echo "=== Collected Hashes ==="
+          cat prebuilt_hashes.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: qjs_${{ needs.generate-matrix.outputs.qjs_hash }}
+          name: qjs ${{ needs.generate-matrix.outputs.qjs_hash_short }}
+          body: |
+            Prebuilt qjs binaries for commit hash: `${{ needs.generate-matrix.outputs.qjs_hash }}`
+          files: |
+            release_assets/*
+            prebuilt_hashes.json
+          draft: false
+          prerelease: false
+
+      - name: Commit and push prebuilt_hashes.json
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add prebuilt_hashes.json
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update prebuilt_hashes.json for ${{ needs.generate-matrix.outputs.qjs_hash }}"
+            git push origin ${{ github.ref_name }}
+          fi

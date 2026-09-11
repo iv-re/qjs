@@ -1,0 +1,6 @@
+.github/
+quickjs/test262/
+quickjs/tests/
+quickjs/doc/
+quickjs/docs/
+quickjs/examples/

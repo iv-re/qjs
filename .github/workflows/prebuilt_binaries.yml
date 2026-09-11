@@ -130,6 +130,21 @@ jobs:
       - name: Build binary
         run: dart tool/build_tool.dart build --config=${{ matrix.config }} -v
 
+      - name: Strip Android binary
+        if: matrix.target_os == 'android'
+        run: |
+          STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          $STRIP --strip-unneeded build_${{ matrix.config }}/${{ matrix.lib_name }}
+
+      - name: Strip Linux binary
+        if: matrix.target_os == 'linux'
+        run: |
+          if [ "${{ matrix.target_cpu }}" = "arm64" ] && [ "$RUNNER_ARCH" != "ARM64" ]; then
+            aarch64-linux-gnu-strip --strip-unneeded build_${{ matrix.config }}/${{ matrix.lib_name }}
+          else
+            strip --strip-unneeded build_${{ matrix.config }}/${{ matrix.lib_name }}
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

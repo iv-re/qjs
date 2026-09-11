@@ -4,7 +4,25 @@
 #include "qjs_dart.h"
 #include "quickjs.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef CRITICAL_SECTION qjs_mutex_t;
+#define qjs_mutex_init(m) InitializeCriticalSection(m)
+#define qjs_mutex_lock(m) EnterCriticalSection(m)
+#define qjs_mutex_unlock(m) LeaveCriticalSection(m)
+#define qjs_mutex_destroy(m) DeleteCriticalSection(m)
+#else
 #include <pthread.h>
+typedef pthread_mutex_t qjs_mutex_t;
+#define qjs_mutex_init(m) pthread_mutex_init(m, NULL)
+#define qjs_mutex_lock(m) pthread_mutex_lock(m)
+#define qjs_mutex_unlock(m) pthread_mutex_unlock(m)
+#define qjs_mutex_destroy(m) pthread_mutex_destroy(m)
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,7 +68,7 @@ struct QJSABIRuntime {
   JSClassID host_function_class_id;
   struct QJSABIManagedPointerImpl *pointers_head;
   struct QJSABIPreparedJavaScript *prepared_head;
-  pthread_mutex_t free_mutex;
+  qjs_mutex_t free_mutex;
   QJSPendingFree * volatile pending_frees;
   void *temp_string_buf;
   JSAtom native_state_atom;
@@ -68,10 +86,10 @@ static void drain_jobs_if_needed(struct QJSABIRuntime *rt) {
 static inline void flush_pending_frees(struct QJSABIRuntime *rt) {
   if (!rt || !rt->ctx || rt->is_released || !rt->pending_frees) return;
 
-  pthread_mutex_lock(&rt->free_mutex);
+  qjs_mutex_lock(&rt->free_mutex);
   QJSPendingFree *curr = rt->pending_frees;
   rt->pending_frees = NULL;
-  pthread_mutex_unlock(&rt->free_mutex);
+  qjs_mutex_unlock(&rt->free_mutex);
 
   while (curr) {
     QJSPendingFree *next = curr->next;
@@ -90,7 +108,7 @@ static void managed_pointer_invalidate(struct QJSABIManagedPointer *self) {
   struct QJSABIManagedPointerImpl *impl = (struct QJSABIManagedPointerImpl *)self;
   struct QJSABIRuntime *rt = impl->rt;
   if (rt) {
-    pthread_mutex_lock(&rt->free_mutex);
+    qjs_mutex_lock(&rt->free_mutex);
     if (!rt->is_released) {
       if (impl->prev) {
         impl->prev->next = impl->next;
@@ -111,7 +129,7 @@ static void managed_pointer_invalidate(struct QJSABIManagedPointer *self) {
         rt->pending_frees = pf;
       }
     }
-    pthread_mutex_unlock(&rt->free_mutex);
+    qjs_mutex_unlock(&rt->free_mutex);
     impl->rt = NULL;
   }
   free(impl);
@@ -140,12 +158,12 @@ static struct QJSABIManagedPointerImpl *create_managed(
   }
   impl->is_atom = is_atom;
   if (rt) {
-    pthread_mutex_lock(&rt->free_mutex);
+    qjs_mutex_lock(&rt->free_mutex);
     impl->prev = NULL;
     impl->next = rt->pointers_head;
     if (rt->pointers_head) rt->pointers_head->prev = impl;
     rt->pointers_head = impl;
-    pthread_mutex_unlock(&rt->free_mutex);
+    qjs_mutex_unlock(&rt->free_mutex);
   } else {
     impl->prev = NULL;
     impl->next = NULL;
@@ -615,7 +633,7 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   };
   JS_NewClass(rt->rt, rt->host_function_class_id, &func_class_def);
 
-  pthread_mutex_init(&rt->free_mutex, NULL);
+  qjs_mutex_init(&rt->free_mutex);
   rt->pending_frees = NULL;
   rt->microtask_queue = config.microtask_queue;
   return rt;
@@ -624,9 +642,9 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
 void qjs_runtime_release(struct QJSABIRuntime *rt) {
   if (!rt) return;
 
-  pthread_mutex_lock(&rt->free_mutex);
+  qjs_mutex_lock(&rt->free_mutex);
   if (rt->is_released) {
-    pthread_mutex_unlock(&rt->free_mutex);
+    qjs_mutex_unlock(&rt->free_mutex);
     return;
   }
   rt->is_released = true;
@@ -662,7 +680,7 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
     free(pfree);
     pfree = pnext;
   }
-  pthread_mutex_unlock(&rt->free_mutex);
+  qjs_mutex_unlock(&rt->free_mutex);
 
   struct QJSABIPreparedJavaScript *pcurr = rt->prepared_head;
   while (pcurr) {
@@ -700,7 +718,7 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
     JS_FreeRuntime(rt->rt);
     rt->rt = NULL;
   }
-  pthread_mutex_destroy(&rt->free_mutex);
+  qjs_mutex_destroy(&rt->free_mutex);
   free(rt);
 }
 

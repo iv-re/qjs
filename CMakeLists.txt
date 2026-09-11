@@ -31,6 +31,7 @@ if(MSVC)
       -wd4068
       -wd4200
       -wd4201
+      -wd4267
   )
 else()
   target_compile_options(qjs_dart PRIVATE

@@ -876,6 +876,10 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   return rt;
 }
 
+void qjs_free(void *ptr) {
+  free(ptr);
+}
+
 void qjs_runtime_release(struct QJSABIRuntime *rt) {
   if (!rt) return;
   live_runtimes_remove(rt);

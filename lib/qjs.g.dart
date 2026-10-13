@@ -122,6 +122,11 @@ external QJSABIValue qjs_evaluate_javascript(
   ffi.Pointer<ffi.Char> source_url,
 );
 
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>()
+external void qjs_free(
+  ffi.Pointer<ffi.Void> ptr,
+);
+
 @ffi.Native<
   QJSABIValue Function(
     ffi.Pointer<QJSABIRuntime>,

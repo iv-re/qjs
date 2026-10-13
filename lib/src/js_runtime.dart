@@ -208,7 +208,9 @@ class JSRuntime implements Finalizable {
     try {
       return ptr.cast<Utf8>().toDartString();
     } finally {
-      malloc.free(ptr);
+      // Allocated by the C runtime: package:ffi's malloc uses a different
+      // heap on Windows.
+      qjs_free(ptr.cast());
     }
   }
 

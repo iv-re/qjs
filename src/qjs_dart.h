@@ -264,6 +264,10 @@ struct QJSABIRuntime *qjs_runtime_create(
   struct QJSABIRuntimeConfig config
 );
 
+// Frees memory returned by this library (e.g. strings). Callers must not
+// use their own allocator: on Windows it may not share the C runtime's heap.
+void qjs_free(void *ptr);
+
 void qjs_runtime_release(struct QJSABIRuntime *rt);
 void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt);
 

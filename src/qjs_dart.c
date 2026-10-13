@@ -846,7 +846,7 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   JS_AddIntrinsicBigInt(rt->ctx);
   rt->last_js_error = JS_UNDEFINED;
 
-  JSValue ns_sym = JS_NewSymbol(rt->ctx, "native_state", false);
+  JSValue ns_sym = JS_NewPrivateSymbol(rt->ctx, "native_state");
   rt->native_state_atom = JS_ValueToAtom(rt->ctx, ns_sym);
   JS_FreeValue(rt->ctx, ns_sym);
 
@@ -1460,9 +1460,9 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
 
 // Native state
 //
-// The state lives in the opaque of a holder object stored under a symbol
-// property that is neither writable nor configurable, so JS code cannot
-// replace or delete it. Setting the state again swaps the holder's opaque.
+// The state lives in the opaque of a holder object stored under a private
+// symbol, which JS code cannot see. The property is also neither writable
+// nor configurable. Setting the state again swaps the holder's opaque.
 
 // Returns the holder defined directly on obj (not inherited), JS_UNDEFINED if
 // there is none, or JS_EXCEPTION.

@@ -233,9 +233,23 @@ void main() {
       expect(child.getNativeState(), isNull);
     });
 
-    test('native state cannot be removed from JS', () {
+    test('native state is invisible to and cannot be removed from JS', () {
       final obj = JSObject.create(rt)..setNativeState('state');
       rt.global['obj'] = obj.asValue;
+      expect(
+        rt.evaluateJavascript('Reflect.ownKeys(obj).length').asNumber,
+        0,
+      );
+      expect(
+        rt
+            .evaluateJavascript('Object.getOwnPropertySymbols(obj).length')
+            .asNumber,
+        0,
+      );
+      expect(
+        rt.evaluateJavascript('JSON.stringify(obj)').asDartString,
+        '{}',
+      );
       rt.evaluateJavascript('''
         for (const s of Object.getOwnPropertySymbols(obj)) {
           try { obj[s] = {}; } catch (e) {}

@@ -973,14 +973,22 @@ struct QJSABIObjectOrError qjs_object_create(struct QJSABIRuntime *rt) {
   return res;
 }
 
+// Returns JS_ATOM_NULL with a pending exception if the key cannot be
+// converted (e.g. its toString() throws).
+static JSAtom abi_value_to_atom(struct QJSABIRuntime *rt, const struct QJSABIValue *key) {
+  JSValue key_val = from_qjs_abi_value(rt, key);
+  JSAtom atom = JS_ValueToAtom(rt->ctx, key_val);
+  JS_FreeValue(rt->ctx, key_val);
+  return atom;
+}
+
 struct QJSABIValue qjs_object_get_property_from_value(
   struct QJSABIRuntime *rt,
   struct QJSABIObject obj,
   struct QJSABIValue key
 ) {
-  JSValue key_val = from_qjs_abi_value(rt, &key);
-  JSAtom atom = JS_ValueToAtom(rt->ctx, key_val);
-  JS_FreeValue(rt->ctx, key_val);
+  JSAtom atom = abi_value_to_atom(rt, &key);
+  if (atom == JS_ATOM_NULL) return return_js_error_val(rt);
 
   JSValue res = JS_GetProperty(rt->ctx, get_js_value(obj.pointer), atom);
   JS_FreeAtom(rt->ctx, atom);
@@ -994,9 +1002,11 @@ struct QJSABIVoidOrError qjs_object_set_property_from_value(
   struct QJSABIValue key,
   struct QJSABIValue value
 ) {
-  JSValue key_val = from_qjs_abi_value(rt, &key);
-  JSAtom atom = JS_ValueToAtom(rt->ctx, key_val);
-  JS_FreeValue(rt->ctx, key_val);
+  JSAtom atom = abi_value_to_atom(rt, &key);
+  if (atom == JS_ATOM_NULL) {
+    struct QJSABIVoidOrError res = { .void_or_error = return_void_or_error(rt, -1) };
+    return res;
+  }
 
   int ret = JS_SetProperty(rt->ctx, get_js_value(obj.pointer), atom, from_qjs_abi_value(rt, &value));
   JS_FreeAtom(rt->ctx, atom);
@@ -1009,9 +1019,11 @@ struct QJSABIBoolOrError qjs_object_has_property_from_value(
   struct QJSABIObject obj,
   struct QJSABIValue key
 ) {
-  JSValue key_val = from_qjs_abi_value(rt, &key);
-  JSAtom atom = JS_ValueToAtom(rt->ctx, key_val);
-  JS_FreeValue(rt->ctx, key_val);
+  JSAtom atom = abi_value_to_atom(rt, &key);
+  if (atom == JS_ATOM_NULL) {
+    struct QJSABIBoolOrError res = { .bool_or_error = return_bool_or_error(rt, -1) };
+    return res;
+  }
 
   int ret = JS_HasProperty(rt->ctx, get_js_value(obj.pointer), atom);
   JS_FreeAtom(rt->ctx, atom);
@@ -1072,14 +1084,16 @@ struct QJSABIArrayOrError qjs_object_get_property_names(
   }
 
   JSValue arr = JS_NewArray(rt->ctx);
-  for (uint32_t i = 0; i < len; i++) {
+  for (uint32_t i = 0; i < len && !JS_IsException(arr); i++) {
     JSValue propVal = JS_AtomToValue(rt->ctx, tab[i].atom);
-    JS_SetPropertyUint32(rt->ctx, arr, i, propVal);
-    JS_FreeAtom(rt->ctx, tab[i].atom);
+    if (JS_IsException(propVal) || JS_SetPropertyUint32(rt->ctx, arr, i, propVal) < 0) {
+      JS_FreeValue(rt->ctx, arr);
+      arr = JS_EXCEPTION;
+    }
   }
-  js_free(rt->ctx, tab);
+  JS_FreePropertyEnum(rt->ctx, tab, len);
 
-  res.ptr_or_error = (uintptr_t)create_managed_pointer(rt, arr);
+  res.ptr_or_error = return_ptr_or_error(rt, arr);
   return res;
 }
 
@@ -1117,14 +1131,22 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
   QJSABIHostObjectGetOwnKeys get_own_keys_cb,
   QJSABIHostObjectRelease release_cb
 ) {
-  JSValue obj = JS_NewObjectClass(rt->ctx, rt->host_object_class_id);
   struct QJSABIObjectOrError res;
-  if (JS_IsException(obj)) {
-    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeJSError);
+  QJSHostObjectBridge *bridge = (QJSHostObjectBridge *)malloc(sizeof(QJSHostObjectBridge));
+  if (!bridge) {
+    if (release_cb) release_cb(user_data);
+    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeNativeException);
     return res;
   }
 
-  QJSHostObjectBridge *bridge = (QJSHostObjectBridge *)malloc(sizeof(QJSHostObjectBridge));
+  JSValue obj = JS_NewObjectClass(rt->ctx, rt->host_object_class_id);
+  if (JS_IsException(obj)) {
+    free(bridge);
+    if (release_cb) release_cb(user_data);
+    res.ptr_or_error = return_ptr_or_error(rt, obj);
+    return res;
+  }
+
   bridge->user_data = user_data;
   bridge->rt = rt;
   bridge->get_cb = get_cb;
@@ -1155,10 +1177,20 @@ struct QJSABIVoidOrError qjs_object_set_native_state(
   b->release_cb = release_cb;
 
   JSValue ns_obj = JS_NewObjectClass(rt->ctx, rt->native_state_class_id);
+  if (JS_IsException(ns_obj)) {
+    free(b);
+    if (release_cb) release_cb(user_data);
+    struct QJSABIVoidOrError res = { .void_or_error = return_void_or_error(rt, -1) };
+    return res;
+  }
+  // From here on b is owned by ns_obj: if the define fails, ns_obj is freed
+  // and its finalizer calls release_cb.
   JS_SetOpaque(ns_obj, b);
-  JS_DefinePropertyValue(rt->ctx, get_js_value(obj.pointer), rt->native_state_atom, ns_obj, 0);
+  int ret = JS_DefinePropertyValue(
+    rt->ctx, get_js_value(obj.pointer), rt->native_state_atom, ns_obj, JS_PROP_THROW
+  );
 
-  struct QJSABIVoidOrError res = { .void_or_error = 0 };
+  struct QJSABIVoidOrError res = { .void_or_error = return_void_or_error(rt, ret) };
   return res;
 }
 
@@ -1233,17 +1265,34 @@ struct QJSABIFunctionOrError qjs_function_create_from_host(
   QJSABIHostFunctionCall call_cb,
   QJSABIHostFunctionRelease release_cb
 ) {
+  struct QJSABIFunctionOrError res;
   QJSHostFunctionBridge *b = (QJSHostFunctionBridge *)malloc(sizeof(QJSHostFunctionBridge));
+  if (!b) {
+    if (release_cb) release_cb(user_data);
+    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeNativeException);
+    return res;
+  }
   b->user_data = user_data;
   b->rt = rt;
   b->call_cb = call_cb;
   b->release_cb = release_cb;
 
   JSValue data_obj = JS_NewObjectClass(rt->ctx, rt->host_function_class_id);
+  if (JS_IsException(data_obj)) {
+    free(b);
+    if (release_cb) release_cb(user_data);
+    res.ptr_or_error = return_ptr_or_error(rt, data_obj);
+    return res;
+  }
+  // From here on b is owned by data_obj and released by its finalizer.
   JS_SetOpaque(data_obj, b);
 
   JSValue fn = JS_NewCFunctionData(rt->ctx, host_function_call, (int)length, 0, 1, &data_obj);
   JS_FreeValue(rt->ctx, data_obj);
+  if (JS_IsException(fn)) {
+    res.ptr_or_error = return_ptr_or_error(rt, fn);
+    return res;
+  }
 
   JSAtom name_atom = get_js_atom(name.pointer);
   if (name_atom != 0) {
@@ -1254,7 +1303,7 @@ struct QJSABIFunctionOrError qjs_function_create_from_host(
     }
   }
 
-  struct QJSABIFunctionOrError res = { .ptr_or_error = (uintptr_t)create_managed_pointer(rt, fn) };
+  res.ptr_or_error = return_ptr_or_error(rt, fn);
   return res;
 }
 
@@ -1300,9 +1349,14 @@ struct QJSABIPropNameIDOrError qjs_propnameid_create_from_string(
   struct QJSABIRuntime *rt,
   struct QJSABIString str
 ) {
-  struct QJSABIPropNameIDOrError res = {
-    .ptr_or_error = (uintptr_t)create_managed_atom(rt, JS_ValueToAtom(rt->ctx, get_js_value(str.pointer)))
-  };
+  struct QJSABIPropNameIDOrError res;
+  JSAtom atom = JS_ValueToAtom(rt->ctx, get_js_value(str.pointer));
+  if (atom == JS_ATOM_NULL) {
+    record_js_exception(rt);
+    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeJSError);
+    return res;
+  }
+  res.ptr_or_error = (uintptr_t)create_managed_atom(rt, atom);
   return res;
 }
 
@@ -1310,9 +1364,14 @@ struct QJSABIPropNameIDOrError qjs_propnameid_create_from_symbol(
   struct QJSABIRuntime *rt,
   struct QJSABISymbol sym
 ) {
-  struct QJSABIPropNameIDOrError res = {
-    .ptr_or_error = (uintptr_t)create_managed_atom(rt, JS_ValueToAtom(rt->ctx, get_js_value(sym.pointer)))
-  };
+  struct QJSABIPropNameIDOrError res;
+  JSAtom atom = JS_ValueToAtom(rt->ctx, get_js_value(sym.pointer));
+  if (atom == JS_ATOM_NULL) {
+    record_js_exception(rt);
+    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeJSError);
+    return res;
+  }
+  res.ptr_or_error = (uintptr_t)create_managed_atom(rt, atom);
   return res;
 }
 
@@ -1417,8 +1476,10 @@ int64_t qjs_bigint_as_int64(struct QJSABIRuntime *rt, struct QJSABIBigInt bi) {
 
 struct QJSABIArrayOrError qjs_array_create(struct QJSABIRuntime *rt, size_t length) {
   JSValue arr = JS_NewArray(rt->ctx);
-  if (length > 0) {
-    JS_SetPropertyStr(rt->ctx, arr, "length", JS_NewInt32(rt->ctx, (int32_t)length));
+  if (length > 0 && !JS_IsException(arr) &&
+      JS_SetPropertyStr(rt->ctx, arr, "length", JS_NewInt64(rt->ctx, (int64_t)length)) < 0) {
+    JS_FreeValue(rt->ctx, arr);
+    arr = JS_EXCEPTION;
   }
   struct QJSABIArrayOrError res = { .ptr_or_error = return_ptr_or_error(rt, arr) };
   return res;
@@ -1437,10 +1498,7 @@ struct QJSABIValueOrError qjs_array_value_get_at_index(
   struct QJSABIArray arr,
   size_t index
 ) {
-  struct QJSABIValueOrError res = {
-    .value = to_qjs_abi_value(rt, JS_GetPropertyUint32(rt->ctx, get_js_value(arr.pointer), (uint32_t)index))
-  };
-  return res;
+  return return_val_or_error(rt, JS_GetPropertyUint32(rt->ctx, get_js_value(arr.pointer), (uint32_t)index));
 }
 
 struct QJSABIVoidOrError qjs_array_value_set_at_index(

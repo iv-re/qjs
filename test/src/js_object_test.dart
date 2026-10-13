@@ -152,6 +152,12 @@ void main() {
       expect(propNames.length, equals(0));
     });
 
+    test('native state on a frozen object throws', () {
+      final obj = rt.evaluateJavascript('Object.freeze({})').asObject;
+      expect(() => obj.setNativeState('state'), throwsA(isA<JSException>()));
+      expect(obj.getNativeState(), isNull);
+    });
+
     test('defineProperty with accessors', () {
       final obj = JSObject.create(rt);
       var value = 0;

@@ -18,6 +18,39 @@ void main() {
       expect(arr.length, equals(5));
     });
 
+    test('create with invalid length throws RangeError', () {
+      expect(
+        () => JSArray.create(rt, 1 << 33),
+        throwsA(
+          isA<JSException>().having(
+            (e) => e.value.asObject['name'].asDartString,
+            'name',
+            'RangeError',
+          ),
+        ),
+      );
+    });
+
+    test('indexed access propagates getter errors', () {
+      final arr = rt
+          .evaluateJavascript('''
+            var a = [1];
+            Object.defineProperty(a, 0, { get() { throw new Error('boom'); } });
+            a;
+          ''')
+          .asArray;
+      expect(
+        () => arr[0],
+        throwsA(
+          isA<JSException>().having(
+            (e) => e.value.asObject['message'].asDartString,
+            'message',
+            'boom',
+          ),
+        ),
+      );
+    });
+
     test('indexed access', () {
       final arr = JSArray.create(rt, 2);
       arr[0] = JSValue.number(rt, 10);

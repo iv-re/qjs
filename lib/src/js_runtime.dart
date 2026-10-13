@@ -10,9 +10,6 @@ import 'package:qjs/src/js_prepared_javascript.dart';
 import 'package:qjs/src/js_runtime_config.dart';
 import 'package:qjs/src/js_value.dart';
 
-typedef _QJSRuntimeReleaseFn =
-    NativeFunction<Void Function(Pointer<QJSABIRuntime>)>;
-
 final Map<int, WeakReference<JSRuntime>> _runtimesRegistry = {};
 
 class JSRuntime implements Finalizable {
@@ -30,7 +27,7 @@ class JSRuntime implements Finalizable {
   JSRuntime.create([
     JSRuntimeConfig config = const JSRuntimeConfig.hardened(),
   ]) : ptr = _createRuntime(config) {
-    _finalizer.attach(this, ptr.cast(), detach: this, externalSize: 512);
+    _finalizer.attach(this, ptr, detach: this);
     _runtimesRegistry[ptr.address] = WeakReference(this);
   }
 
@@ -45,15 +42,15 @@ class JSRuntime implements Finalizable {
     return qjs_runtime_create(struct);
   }
 
-  static NativeFinalizer _createFinalizer() {
-    final ptr = Native.addressOf<_QJSRuntimeReleaseFn>(
-      qjs_runtime_release_from_finalizer,
-    );
-
-    return NativeFinalizer(ptr.cast());
-  }
-
-  static final NativeFinalizer _finalizer = _createFinalizer();
+  // A Dart Finalizer rather than a NativeFinalizer: releasing a runtime runs
+  // JS finalizers that call back into Dart through NativeCallable.listener,
+  // which must not happen inside a GC.
+  static final Finalizer<Pointer<QJSABIRuntime>> _finalizer = Finalizer((ptr) {
+    if (_runtimesRegistry[ptr.address]?.target == null) {
+      _runtimesRegistry.remove(ptr.address);
+    }
+    qjs_runtime_release(ptr);
+  });
 
   @internal
   final Pointer<QJSABIRuntime> ptr;
@@ -188,6 +185,12 @@ class JSRuntime implements Finalizable {
     qjs_runtime_set_native_exception_message(ptr, nativeMsg.cast());
   });
 
+  /// Releases the runtime and all JS values it owns.
+  ///
+  /// Always call this when the runtime is no longer needed. The finalizer
+  /// attached to the runtime is only a safety net: it is not guaranteed to
+  /// run, and never runs if the isolate exits first, so a runtime that is
+  /// not released explicitly may leak its whole JS heap.
   void release() {
     if (_released) return;
     _memoizedCache.clear();

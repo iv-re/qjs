@@ -473,7 +473,7 @@ throw JSException(typeError);
 ### Finalizers & Reference Counting
 
 * **Automatic Cleanup**: Every `JSValue`, `JSObject`, `JSArray`, and `JSPreparedJavaScript` registers with Dart's `NativeFinalizer`. When a Dart handle is garbage collected, the underlying native reference count is decremented automatically.
-* **Explicit Release**: Call `rt.release()` when finished with a runtime to free all associated memory, global objects, and native contexts deterministically.
+* **Explicit Release**: Always call `rt.release()` when finished with a runtime to free all associated memory, global objects, and native contexts deterministically.
 * **Retaining Handles**: Use `value.retain()` to increment the native reference count when sharing handles across asynchronous boundaries.
 
 ### Weak References (JSWeakObject)

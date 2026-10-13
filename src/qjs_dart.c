@@ -14,6 +14,9 @@ typedef CRITICAL_SECTION qjs_mutex_t;
 #define qjs_mutex_lock(m) EnterCriticalSection(m)
 #define qjs_mutex_unlock(m) LeaveCriticalSection(m)
 #define qjs_mutex_destroy(m) DeleteCriticalSection(m)
+typedef volatile LONG qjs_refcount_t;
+#define qjs_refcount_inc(p) InterlockedIncrement(p)
+#define qjs_refcount_dec(p) InterlockedDecrement(p)
 #else
 #include <pthread.h>
 typedef pthread_mutex_t qjs_mutex_t;
@@ -21,6 +24,9 @@ typedef pthread_mutex_t qjs_mutex_t;
 #define qjs_mutex_lock(m) pthread_mutex_lock(m)
 #define qjs_mutex_unlock(m) pthread_mutex_unlock(m)
 #define qjs_mutex_destroy(m) pthread_mutex_destroy(m)
+typedef int qjs_refcount_t;
+#define qjs_refcount_inc(p) __atomic_add_fetch(p, 1, __ATOMIC_RELAXED)
+#define qjs_refcount_dec(p) __atomic_sub_fetch(p, 1, __ATOMIC_ACQ_REL)
 #endif
 
 #include <stdbool.h>
@@ -68,7 +74,14 @@ struct QJSABIRuntime {
   JSClassID host_function_class_id;
   struct QJSABIManagedPointerImpl *pointers_head;
   struct QJSABIPreparedJavaScript *prepared_head;
+  // Guards pointers_head, prepared_head, pending_frees and is_released.
+  // Never call into JS while holding it: JS finalizers may call into Dart,
+  // which can wait for a GC whose NativeFinalizers wait for this mutex.
   qjs_mutex_t free_mutex;
+  // One reference is owned by the runtime itself, one by every managed and
+  // prepared pointer. The struct (and free_mutex) outlives JS_FreeRuntime
+  // until the last reference is dropped, so finalizers can always lock it.
+  qjs_refcount_t refcount;
   QJSPendingFree * volatile pending_frees;
   void *temp_string_buf;
   JSAtom native_state_atom;
@@ -83,6 +96,43 @@ static void drain_jobs_if_needed(struct QJSABIRuntime *rt) {
   }
 }
 
+static void runtime_retain(struct QJSABIRuntime *rt) {
+  qjs_refcount_inc(&rt->refcount);
+}
+
+static void runtime_unref(struct QJSABIRuntime *rt) {
+  if (qjs_refcount_dec(&rt->refcount) == 0) {
+    qjs_mutex_destroy(&rt->free_mutex);
+    free(rt);
+  }
+}
+
+// Must be called with free_mutex held and is_released == false.
+static void push_pending_free_locked(struct QJSABIRuntime *rt, QJSValueOrAtom u, bool is_atom) {
+  QJSPendingFree *pf = (QJSPendingFree *)malloc(sizeof(QJSPendingFree));
+  if (pf) {
+    pf->u = u;
+    pf->is_atom = is_atom;
+    pf->next = rt->pending_frees;
+    rt->pending_frees = pf;
+  }
+}
+
+static void free_pending_list(JSContext *ctx, QJSPendingFree *curr) {
+  while (curr) {
+    QJSPendingFree *next = curr->next;
+    if (ctx) {
+      if (curr->is_atom) {
+        JS_FreeAtom(ctx, curr->u.atom);
+      } else {
+        JS_FreeValue(ctx, curr->u.val);
+      }
+    }
+    free(curr);
+    curr = next;
+  }
+}
+
 static inline void flush_pending_frees(struct QJSABIRuntime *rt) {
   if (!rt || !rt->ctx || rt->is_released || !rt->pending_frees) return;
 
@@ -91,16 +141,7 @@ static inline void flush_pending_frees(struct QJSABIRuntime *rt) {
   rt->pending_frees = NULL;
   qjs_mutex_unlock(&rt->free_mutex);
 
-  while (curr) {
-    QJSPendingFree *next = curr->next;
-    if (curr->is_atom) {
-      JS_FreeAtom(rt->ctx, curr->u.atom);
-    } else {
-      JS_FreeValue(rt->ctx, curr->u.val);
-    }
-    free(curr);
-    curr = next;
-  }
+  free_pending_list(rt->ctx, curr);
 }
 
 static void managed_pointer_invalidate(struct QJSABIManagedPointer *self) {
@@ -120,17 +161,11 @@ static void managed_pointer_invalidate(struct QJSABIManagedPointer *self) {
       }
       impl->prev = NULL;
       impl->next = NULL;
-
-      QJSPendingFree *pf = (QJSPendingFree *)malloc(sizeof(QJSPendingFree));
-      if (pf) {
-        pf->u = impl->u;
-        pf->is_atom = impl->is_atom;
-        pf->next = rt->pending_frees;
-        rt->pending_frees = pf;
-      }
+      push_pending_free_locked(rt, impl->u, impl->is_atom);
     }
     qjs_mutex_unlock(&rt->free_mutex);
     impl->rt = NULL;
+    runtime_unref(rt);
   }
   free(impl);
 }
@@ -158,6 +193,7 @@ static struct QJSABIManagedPointerImpl *create_managed(
   }
   impl->is_atom = is_atom;
   if (rt) {
+    runtime_retain(rt);
     qjs_mutex_lock(&rt->free_mutex);
     impl->prev = NULL;
     impl->next = rt->pointers_head;
@@ -634,6 +670,7 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   JS_NewClass(rt->rt, rt->host_function_class_id, &func_class_def);
 
   qjs_mutex_init(&rt->free_mutex);
+  rt->refcount = 1;
   rt->pending_frees = NULL;
   rt->microtask_queue = config.microtask_queue;
   return rt;
@@ -642,58 +679,44 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
 void qjs_runtime_release(struct QJSABIRuntime *rt) {
   if (!rt) return;
 
+  // Only detach the lists under the lock. Freeing JS values can run JS
+  // finalizers that call into Dart, and doing that with free_mutex held
+  // deadlocks against NativeFinalizers running during a GC.
   qjs_mutex_lock(&rt->free_mutex);
   if (rt->is_released) {
     qjs_mutex_unlock(&rt->free_mutex);
     return;
   }
-  rt->is_released = true;
 
   struct QJSABIManagedPointerImpl *curr = rt->pointers_head;
   while (curr) {
     struct QJSABIManagedPointerImpl *next = curr->next;
-    if (rt->ctx) {
-      if (curr->is_atom) {
-        JS_FreeAtom(rt->ctx, curr->u.atom);
-      } else {
-        JS_FreeValue(rt->ctx, curr->u.val);
-      }
-    }
-    curr->rt = NULL;
+    // The impl stays owned by its Dart finalizer, which may free it as soon
+    // as the lock is released, so copy the value out now.
+    push_pending_free_locked(rt, curr->u, curr->is_atom);
     curr->prev = NULL;
     curr->next = NULL;
     curr = next;
   }
   rt->pointers_head = NULL;
 
-  QJSPendingFree *pfree = rt->pending_frees;
-  rt->pending_frees = NULL;
-  while (pfree) {
-    QJSPendingFree *pnext = pfree->next;
-    if (rt->ctx) {
-      if (pfree->is_atom) {
-        JS_FreeAtom(rt->ctx, pfree->u.atom);
-      } else {
-        JS_FreeValue(rt->ctx, pfree->u.val);
-      }
-    }
-    free(pfree);
-    pfree = pnext;
-  }
-  qjs_mutex_unlock(&rt->free_mutex);
-
   struct QJSABIPreparedJavaScript *pcurr = rt->prepared_head;
   while (pcurr) {
     struct QJSABIPreparedJavaScript *pnext = pcurr->next;
-    if (rt->ctx) {
-      JS_FreeValue(rt->ctx, pcurr->func_obj);
-    }
-    pcurr->rt = NULL;
+    QJSValueOrAtom u = { .val = pcurr->func_obj };
+    push_pending_free_locked(rt, u, false);
     pcurr->prev = NULL;
     pcurr->next = NULL;
     pcurr = pnext;
   }
   rt->prepared_head = NULL;
+
+  QJSPendingFree *pfree = rt->pending_frees;
+  rt->pending_frees = NULL;
+  rt->is_released = true;
+  qjs_mutex_unlock(&rt->free_mutex);
+
+  free_pending_list(rt->ctx, pfree);
 
   if (!JS_IsUndefined(rt->last_js_error)) {
     JS_FreeValue(rt->ctx, rt->last_js_error);
@@ -718,8 +741,7 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
     JS_FreeRuntime(rt->rt);
     rt->rt = NULL;
   }
-  qjs_mutex_destroy(&rt->free_mutex);
-  free(rt);
+  runtime_unref(rt);
 }
 
 void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt) {
@@ -768,12 +790,20 @@ struct QJSABIPreparedJavaScriptOrError qjs_runtime_prepared_javascript_create(
 
   struct QJSABIPreparedJavaScript *prep =
     (struct QJSABIPreparedJavaScript *)malloc(sizeof(struct QJSABIPreparedJavaScript));
+  if (!prep) {
+    JS_FreeValue(rt->ctx, func_obj);
+    res.ptr_or_error = make_error_ptr(QJSABIErrorCodeNativeException);
+    return res;
+  }
+  runtime_retain(rt);
   prep->rt = rt;
   prep->func_obj = func_obj;
+  qjs_mutex_lock(&rt->free_mutex);
   prep->prev = NULL;
   prep->next = rt->prepared_head;
   if (rt->prepared_head) rt->prepared_head->prev = prep;
   rt->prepared_head = prep;
+  qjs_mutex_unlock(&rt->free_mutex);
   res.ptr_or_error = (uintptr_t)prep;
   return res;
 }
@@ -795,20 +825,28 @@ struct QJSABIValueOrError qjs_runtime_prepared_javascript_evaluate(
 
 void qjs_preparedjavascript_release(struct QJSABIPreparedJavaScript *prepared) {
   if (!prepared) return;
+  // May run from a NativeFinalizer on a GC thread, so the value is only
+  // queued here and freed by the mutator in flush_pending_frees.
   struct QJSABIRuntime *rt = prepared->rt;
   if (rt) {
-    if (prepared->prev) {
-      prepared->prev->next = prepared->next;
-    } else if (rt->prepared_head == prepared) {
-      rt->prepared_head = prepared->next;
+    qjs_mutex_lock(&rt->free_mutex);
+    if (!rt->is_released) {
+      if (prepared->prev) {
+        prepared->prev->next = prepared->next;
+      } else if (rt->prepared_head == prepared) {
+        rt->prepared_head = prepared->next;
+      }
+      if (prepared->next) {
+        prepared->next->prev = prepared->prev;
+      }
+      prepared->prev = NULL;
+      prepared->next = NULL;
+      QJSValueOrAtom u = { .val = prepared->func_obj };
+      push_pending_free_locked(rt, u, false);
     }
-    if (prepared->next) {
-      prepared->next->prev = prepared->prev;
-    }
-    prepared->prev = NULL;
-    prepared->next = NULL;
-    if (rt->ctx) JS_FreeValue(rt->ctx, prepared->func_obj);
+    qjs_mutex_unlock(&rt->free_mutex);
     prepared->rt = NULL;
+    runtime_unref(rt);
   }
   free(prepared);
 }

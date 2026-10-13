@@ -1,6 +1,6 @@
 name: qjs
 description: QuickJS bindings for Dart.
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/iv-re/qjs
 homepage: https://github.com/iv-re/qjs
 issue_tracker: https://github.com/iv-re/qjs/issues

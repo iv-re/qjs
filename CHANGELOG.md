@@ -1,3 +1,10 @@
+## 0.2.1
+
+### Fixes
+
+- Using a `JSRuntime` after `release()` now throws a `StateError` instead of crashing the process. This includes a `JSPromise.fromAsyncFunction` callback that builds its result after the runtime was released while it was awaiting.
+- Updated the code examples in the API docs to the current API.
+
 ## 0.2.0
 
 ### Breaking changes

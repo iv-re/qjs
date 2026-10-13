@@ -1363,15 +1363,28 @@ static const struct QJSABIPropNameIDListVTable g_prop_list_vtable = {
   prop_name_id_list_release
 };
 
+// Copies `props` and clones every pointer in it: the caller keeps ownership
+// of both, and may free them as soon as this returns.
 struct QJSABIPropNameIDList *qjs_propnameid_list_create(
   const struct QJSABIPropNameID *props,
   size_t size
 ) {
   struct QJSABIPropNameIDList *list =
     (struct QJSABIPropNameIDList *)malloc(sizeof(struct QJSABIPropNameIDList));
+  struct QJSABIPropNameID *copy =
+    (struct QJSABIPropNameID *)calloc(size > 0 ? size : 1, sizeof(struct QJSABIPropNameID));
+  if (!list || !copy) {
+    free(list);
+    free(copy);
+    return NULL;
+  }
+  for (size_t i = 0; i < size; i++) {
+    struct QJSABIManagedPointerImpl *impl = (struct QJSABIManagedPointerImpl *)props[i].pointer;
+    copy[i].pointer = impl ? qjs_managed_pointer_clone(impl->rt, props[i].pointer) : NULL;
+  }
   list->vtable = &g_prop_list_vtable;
   list->size = size;
-  list->props = props;
+  list->props = copy;
   return list;
 }
 

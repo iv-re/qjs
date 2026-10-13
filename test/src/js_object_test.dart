@@ -114,6 +114,25 @@ void main() {
       expect(obj['y'].asDartString, equals('hello'));
     });
 
+    test('host object keys from JS', () {
+      final hostObj = MockHostObject();
+      rt.global['h'] = JSObject.createFromHostObject(rt, hostObj).asValue;
+      rt.evaluateJavascript('h.a = 1; h.b = 2;');
+
+      for (var i = 0; i < 100; i++) {
+        expect(rt.evaluateJavascript('"a" in h').asBoolean, isTrue);
+        expect(rt.evaluateJavascript('"z" in h').asBoolean, isFalse);
+      }
+
+      final names = rt
+          .evaluateJavascript('Object.getOwnPropertyNames(h)')
+          .asArray;
+      expect(
+        List.generate(names.length, (i) => names[i].asDartString),
+        unorderedEquals(['a', 'b']),
+      );
+    });
+
     test('native state', () {
       final obj = JSObject.create(rt);
       final state = {'id': 123};

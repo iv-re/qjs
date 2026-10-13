@@ -490,6 +490,7 @@ typedef struct QJSHostObjectBridge {
   QJSABIHostObjectGet get_cb;
   QJSABIHostObjectSet set_cb;
   QJSABIHostObjectGetOwnKeys get_own_keys_cb;
+  QJSABIHostObjectHas has_cb;
   QJSABIHostObjectRelease release_cb;
 } QJSHostObjectBridge;
 
@@ -580,10 +581,27 @@ static int host_object_set_property(
   return 0;
 }
 
-// A host object owns exactly the keys its getOwnKeys callback returns.
-// Returns 1 if `atom` is one of them, 0 if not, -1 with a pending exception.
+// A host object owns the keys its has callback accepts or, without one, the
+// keys its getOwnKeys callback returns. Returns 1 if `atom` is one of them, 0 if not, -1 with a pending exception.
 static int host_object_has_own_key(JSContext *ctx, QJSHostObjectBridge *bridge, JSAtom atom) {
-  if (!bridge || !bridge->get_own_keys_cb) return 0;
+  if (!bridge) return 0;
+  if (bridge->has_cb) {
+    struct QJSABIPropNameID name = {
+      .pointer = (struct QJSABIManagedPointer *)create_managed_atom(bridge->rt, JS_DupAtom(ctx, atom))
+    };
+    if (!name.pointer) {
+      JS_ThrowOutOfMemory(ctx);
+      return -1;
+    }
+    struct QJSABIBoolOrError res = bridge->has_cb(bridge->user_data, bridge->rt, name);
+    qjs_pointer_release(name.pointer);
+    if (is_error_ptr(res.bool_or_error)) {
+      raise_abi_error(bridge->rt, ctx, (int)get_error_from_ptr(res.bool_or_error));
+      return -1;
+    }
+    return (res.bool_or_error >> 2) != 0;
+  }
+  if (!bridge->get_own_keys_cb) return 0;
   struct QJSABIPropNameIDListPtrOrError keysRes = bridge->get_own_keys_cb(bridge->user_data, bridge->rt);
   if (is_error_ptr(keysRes.ptr_or_error)) {
     raise_abi_error(bridge->rt, ctx, (int)get_error_from_ptr(keysRes.ptr_or_error));
@@ -1408,6 +1426,7 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
   QJSABIHostObjectGet get_cb,
   QJSABIHostObjectSet set_cb,
   QJSABIHostObjectGetOwnKeys get_own_keys_cb,
+  QJSABIHostObjectHas has_cb,
   QJSABIHostObjectRelease release_cb
 ) {
   struct QJSABIObjectOrError res;
@@ -1431,6 +1450,7 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
   bridge->get_cb = get_cb;
   bridge->set_cb = set_cb;
   bridge->get_own_keys_cb = get_own_keys_cb;
+  bridge->has_cb = has_cb;
   bridge->release_cb = release_cb;
 
   JS_SetOpaque(obj, bridge);

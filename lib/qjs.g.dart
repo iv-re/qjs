@@ -227,6 +227,7 @@ external QJSABIObjectOrError qjs_object_create(
     QJSABIHostObjectGet,
     QJSABIHostObjectSet,
     QJSABIHostObjectGetOwnKeys,
+    QJSABIHostObjectHas,
     QJSABIHostObjectRelease,
   )
 >()
@@ -236,6 +237,7 @@ external QJSABIObjectOrError qjs_object_create_from_host_object(
   QJSABIHostObjectGet get_cb,
   QJSABIHostObjectSet set_cb,
   QJSABIHostObjectGetOwnKeys get_own_keys_cb,
+  QJSABIHostObjectHas has_cb,
   QJSABIHostObjectRelease release_cb,
 );
 
@@ -749,6 +751,13 @@ typedef QJSABIHostObjectGetOwnKeysFunction =
       ffi.Pointer<ffi.Void> user_data,
       ffi.Pointer<QJSABIRuntime> rt,
     );
+typedef QJSABIHostObjectHas =
+    ffi.Pointer<ffi.NativeFunction<QJSABIHostObjectHasFunction>>;
+typedef QJSABIHostObjectHasFunction = QJSABIBoolOrError Function(
+  ffi.Pointer<ffi.Void> user_data,
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIPropNameID name,
+);
 typedef QJSABIHostObjectRelease =
     ffi.Pointer<ffi.NativeFunction<QJSABIHostObjectReleaseFunction>>;
 typedef QJSABIHostObjectReleaseFunction = ffi.Void Function(

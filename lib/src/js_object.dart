@@ -51,6 +51,15 @@ abstract class JSHostObject {
   /// Returns keys visible to `Object.keys()` or `for...in`.
   List<JSPropNameId> getPropertyNames(JSRuntime rt) => [];
 
+  /// Whether the object owns the property [name], for `in`, `hasOwnProperty`
+  /// and enumeration.
+  ///
+  /// Defaults to looking [name] up in [getPropertyNames]. Override it when
+  /// that list is expensive to build: enumerating the object asks this once
+  /// per key.
+  bool has(JSRuntime rt, JSPropNameId name) =>
+      getPropertyNames(rt).any((key) => key.equals(name));
+
   /// Called when the object is garbage collected or the runtime is released.
   void release() {}
 }
@@ -87,6 +96,7 @@ extension type JSObject(JSPointer jsPointer) implements Finalizable {
       _hostObjectGetCallable.nativeFunction,
       _hostObjectSetCallable.nativeFunction,
       _hostObjectGetOwnKeysCallable.nativeFunction,
+      _hostObjectHasCallable.nativeFunction,
       _hostObjectReleaseCallable.nativeFunction,
     );
 
@@ -482,3 +492,35 @@ final _hostObjectGetOwnKeysCallable =
               (QJSABIErrorCode.QJSABIErrorCodeNativeException.value << 2) | 1;
       }
     })..keepIsolateAlive = false;
+
+final _hostObjectHasCallable =
+    NativeCallable<QJSABIHostObjectHasFunction>.isolateLocal((
+      Pointer<Void> userData,
+      Pointer<QJSABIRuntime> runtime,
+      QJSABIPropNameID name,
+    ) {
+      final rt = JSRuntime(runtime);
+      final object = _hostObjectsRegistry[userData.address]!;
+
+      int error(QJSABIErrorCode code) => (code.value << 2) | 1;
+      try {
+        final found = object.has(
+          rt,
+          JSPropNameId.fromABI(rt, name, attachFinalizer: false),
+        );
+        return Struct.create<QJSABIBoolOrError>()
+          ..bool_or_error = found ? 4 : 0;
+      } on JSException catch (e) {
+        rt.setJSErrorValue(e.value);
+        return Struct.create<QJSABIBoolOrError>()
+          ..bool_or_error = error(.QJSABIErrorCodeJSError);
+      } on JSNativeException catch (e) {
+        rt.setNativeExceptionMessage(e.message);
+        return Struct.create<QJSABIBoolOrError>()
+          ..bool_or_error = error(.QJSABIErrorCodeNativeException);
+      } catch (e) {
+        rt.setNativeExceptionMessage(e.toString());
+        return Struct.create<QJSABIBoolOrError>()
+          ..bool_or_error = error(.QJSABIErrorCodeNativeException);
+      }
+    });

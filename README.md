@@ -284,6 +284,12 @@ class StorageHostObject extends JSHostObject {
   List<JSPropNameId> getPropertyNames(JSRuntime rt) {
     return _storage.keys.map((k) => JSPropNameId.fromString(rt, k)).toList();
   }
+
+  // Optional: answers `in` and per-key checks without rebuilding the key list.
+  @override
+  bool has(JSRuntime rt, JSPropNameId name) {
+    return _storage.containsKey(name.string);
+  }
 }
 
 final hostObj = JSObject.createFromHostObject(rt, StorageHostObject());

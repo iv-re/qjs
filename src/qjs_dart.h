@@ -142,6 +142,13 @@ typedef struct QJSABIPropNameIDListPtrOrError (*QJSABIHostObjectGetOwnKeys)(
   struct QJSABIRuntime *rt
 );
 
+// Whether the object owns the property `name`.
+typedef struct QJSABIBoolOrError (*QJSABIHostObjectHas)(
+  void *user_data,
+  struct QJSABIRuntime *rt,
+  struct QJSABIPropNameID name
+);
+
 typedef void (*QJSABIHostObjectRelease)(void *user_data);
 
 typedef void (*QJSABIMutableBufferRelease)(void *user_data);
@@ -424,6 +431,7 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
   QJSABIHostObjectGet get_cb,
   QJSABIHostObjectSet set_cb,
   QJSABIHostObjectGetOwnKeys get_own_keys_cb,
+  QJSABIHostObjectHas has_cb,
   QJSABIHostObjectRelease release_cb
 );
 

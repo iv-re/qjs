@@ -42,6 +42,29 @@ class MockHostObject extends JSHostObject {
   }
 }
 
+class _CountingHostObject extends JSHostObject {
+  final Map<String, JSValue> data = {};
+  int keysCalls = 0;
+
+  @override
+  JSValue get(JSRuntime rt, JSPropNameId name) =>
+      data[name.string] ?? JSValue.undefined(rt);
+
+  @override
+  void set(JSRuntime rt, JSPropNameId name, JSValue value) {
+    data[name.string] = value.retain();
+  }
+
+  @override
+  List<JSPropNameId> getPropertyNames(JSRuntime rt) {
+    keysCalls++;
+    return data.keys.map((k) => JSPropNameId.fromString(rt, k)).toList();
+  }
+
+  @override
+  bool has(JSRuntime rt, JSPropNameId name) => data.containsKey(name.string);
+}
+
 void main() {
   group('JSObject', () {
     late JSRuntime rt;
@@ -148,6 +171,19 @@ void main() {
           .asBoolean;
       expect(hasOwn('a'), isTrue);
       expect(hasOwn('z'), isFalse);
+    });
+
+    test('host object has override avoids rebuilding keys', () {
+      final hostObj = _CountingHostObject();
+      rt.global['h'] = JSObject.createFromHostObject(rt, hostObj).asValue;
+      rt.evaluateJavascript('for (let i = 0; i < 50; i++) h["k" + i] = i;');
+
+      expect(rt.evaluateJavascript('"k3" in h').asBoolean, isTrue);
+      expect(rt.evaluateJavascript('"nope" in h').asBoolean, isFalse);
+      expect(hostObj.keysCalls, 0);
+
+      expect(rt.evaluateJavascript('Object.keys(h).length').asNumber, 50);
+      expect(hostObj.keysCalls, 1);
     });
 
     test('host object keys error propagates through in', () {

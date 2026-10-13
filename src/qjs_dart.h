@@ -269,7 +269,6 @@ struct QJSABIRuntime *qjs_runtime_create(
 void qjs_free(void *ptr);
 
 void qjs_runtime_release(struct QJSABIRuntime *rt);
-void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt);
 
 // Sandbox controls
 

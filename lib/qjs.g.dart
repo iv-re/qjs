@@ -537,11 +537,6 @@ external void qjs_runtime_release(
   ffi.Pointer<QJSABIRuntime> rt,
 );
 
-@ffi.Native<ffi.Void Function(ffi.Pointer<QJSABIRuntime>)>()
-external void qjs_runtime_release_from_finalizer(
-  ffi.Pointer<QJSABIRuntime> rt,
-);
-
 @ffi.Native<ffi.Bool Function(ffi.Pointer<QJSABIRuntime>, ffi.Uint64)>()
 external bool qjs_runtime_request_interrupt(
   ffi.Pointer<QJSABIRuntime> rt,

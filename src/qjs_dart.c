@@ -949,10 +949,6 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
   runtime_unref(rt);
 }
 
-void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt) {
-  qjs_runtime_release(rt);
-}
-
 // Sandbox controls
 
 void qjs_runtime_set_deadline(struct QJSABIRuntime *rt, uint64_t timeout_us) {

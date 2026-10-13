@@ -24,13 +24,13 @@ class JSRuntime implements Finalizable {
     return rt;
   }
 
-  JSRuntime._(this.ptr);
+  JSRuntime._(this._ptr);
 
   JSRuntime.create([
     JSRuntimeConfig config = const JSRuntimeConfig.hardened(),
-  ]) : ptr = _createRuntime(config) {
-    _finalizer.attach(this, ptr, detach: this);
-    _runtimesRegistry[ptr.address] = WeakReference(this);
+  ]) : _ptr = _createRuntime(config) {
+    _finalizer.attach(this, _ptr, detach: this);
+    _runtimesRegistry[_ptr.address] = WeakReference(this);
   }
 
   static Pointer<QJSABIRuntime> _createRuntime(JSRuntimeConfig config) {
@@ -54,9 +54,18 @@ class JSRuntime implements Finalizable {
     qjs_runtime_release(ptr);
   });
 
-  @internal
-  final Pointer<QJSABIRuntime> ptr;
+  final Pointer<QJSABIRuntime> _ptr;
   bool _released = false;
+
+  /// The native runtime. Throws a [StateError] once the runtime has been
+  /// released, since the native context no longer exists.
+  @internal
+  Pointer<QJSABIRuntime> get ptr {
+    if (_released) {
+      throw StateError('JSRuntime has been released.');
+    }
+    return _ptr;
+  }
 
   bool get isReleased => _released;
 
@@ -265,9 +274,9 @@ class JSRuntime implements Finalizable {
     if (_released) return;
     _memoizedCache.clear();
     _finalizer.detach(this);
-    _runtimesRegistry.remove(ptr.address);
-    qjs_runtime_release(ptr);
+    _runtimesRegistry.remove(_ptr.address);
     _released = true;
+    qjs_runtime_release(_ptr);
   }
 }
 

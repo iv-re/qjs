@@ -60,6 +60,11 @@ extension type JSPromise._(JSValue value) implements JSValue {
   /// });
   /// rt.global['fetchData'] = fn.asValue;
   /// ```
+  ///
+  /// The runtime may be released while [fn] is awaiting. Using it after
+  /// that throws a [StateError]; the result is then dropped, since there is
+  /// no promise left to settle. Check `rt.isReleased` after an `await` to
+  /// stop early.
   static JSValue fromAsyncFunction(
     JSRuntime rt,
     Future<JSValue> Function() fn,

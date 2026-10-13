@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:qjs/qjs.dart';
 import 'package:test/test.dart';
 
@@ -102,6 +105,46 @@ void main() {
       final tempRt = JSRuntime.create();
       expect(tempRt.release, returnsNormally);
       expect(tempRt.release, returnsNormally);
+    });
+
+    test('use after release throws StateError', () {
+      final tempRt = JSRuntime.create()..release();
+      expect(() => JSValue.string(tempRt, 's'), throwsStateError);
+      expect(
+        () => JSValue.fromJsonUtf8(tempRt, Uint8List.fromList([0x31])),
+        throwsStateError,
+      );
+      expect(() => JSObject.create(tempRt), throwsStateError);
+      expect(() => tempRt.evaluateJavascript('1'), throwsStateError);
+      expect(() => tempRt.prepareJavaScript('1'), throwsStateError);
+      expect(tempRt.runGC, throwsStateError);
+    });
+
+    test('runtime released while a host async function awaits', () async {
+      final tempRt = JSRuntime.create();
+      final gate = Completer<void>();
+      Object? fnError;
+
+      tempRt.global['slow'] = JSFunction.createFromHostFunction(
+        tempRt,
+        (rt, _, _) => JSPromise.fromAsyncFunction(rt, () async {
+          await gate.future;
+          try {
+            return JSValue.string(rt, 'done');
+          } catch (error) {
+            fnError = error;
+            rethrow;
+          }
+        }),
+      ).asValue;
+
+      tempRt
+        ..evaluateJavascript('slow()')
+        ..release();
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fnError, isStateError);
     });
   });
 }

@@ -69,7 +69,7 @@ void main(List<String> args) async {
       ],
       defines: {
         '_GNU_SOURCE': '1',
-        'CONFIG_VERSION': '"0.16.2"',
+        'CONFIG_VERSION': '"0.17.0"',
         'QUICKJS_NG_BUILD': '1',
         'NDEBUG': '1',
       },

@@ -879,18 +879,22 @@ uint64_t qjs_value_get_unique_id(struct QJSABIRuntime *rt, struct QJSABIValue va
 }
 
 struct QJSABIValueOrError qjs_object_from_id(struct QJSABIRuntime *rt, uint64_t id) {
+  // NativeFinalizers unlink and free list entries concurrently, so walk the
+  // list under the lock. Wrap the result after unlocking: creating a managed
+  // pointer takes the same lock.
+  JSValue found = JS_NULL;
+  qjs_mutex_lock(&rt->free_mutex);
   struct QJSABIManagedPointerImpl *curr = rt->pointers_head;
   while (curr) {
     if (!curr->is_atom && JS_VALUE_GET_TAG(curr->u.val) == JS_TAG_OBJECT &&
         (uint64_t)(uintptr_t)JS_VALUE_GET_PTR(curr->u.val) == id) {
-      struct QJSABIValueOrError res = {
-        .value = to_qjs_abi_value(rt, JS_DupValue(rt->ctx, curr->u.val))
-      };
-      return res;
+      found = JS_DupValue(rt->ctx, curr->u.val);
+      break;
     }
     curr = curr->next;
   }
-  struct QJSABIValueOrError res = { .value = to_qjs_abi_value(rt, JS_NULL) };
+  qjs_mutex_unlock(&rt->free_mutex);
+  struct QJSABIValueOrError res = { .value = to_qjs_abi_value(rt, found) };
   return res;
 }
 

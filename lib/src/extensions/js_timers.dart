@@ -86,6 +86,9 @@ class JSTimers {
         void callback() {
           try {
             jsCallbackRetained.asFunctionUnsafe(jsCallbackArgs);
+          } on JSException catch (error) {
+            // Runs from a Dart timer: there is no caller to throw to.
+            _rt.onUncaughtError?.call(error);
           } finally {
             if (type == .timeout) {
               _timers.remove(timerId);

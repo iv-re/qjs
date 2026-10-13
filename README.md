@@ -92,6 +92,11 @@ rt.onUnhandledRejection = (promise, reason, isHandled) {
   if (!isHandled) print('Unhandled rejection: $reason');
 };
 
+// Errors from JS that runs with no Dart caller: timer callbacks, and script
+// continuations resumed by JSPromise.fromAsyncFunction (e.g. interrupted
+// after awaiting a host call).
+rt.onUncaughtError = (error) => print('Script error: $error');
+
 // Collect garbage between script runs.
 rt.runGC();
 ```

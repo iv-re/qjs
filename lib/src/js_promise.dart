@@ -72,7 +72,7 @@ extension type JSPromise._(JSValue value) implements JSValue {
       try {
         settler([value]);
       } on JSException catch (error) {
-        rt.onMicrotaskError?.call(error);
+        rt.onUncaughtError?.call(error);
       }
     }
 

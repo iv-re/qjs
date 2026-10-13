@@ -99,10 +99,10 @@ void main() {
       expect(queued.drainMicrotasks(), isTrue);
     });
 
-    test('after awaiting a host call goes to onMicrotaskError', () async {
+    test('after awaiting a host call goes to onUncaughtError', () async {
       final errors = Completer<JSException>();
       rt
-        ..onMicrotaskError = errors.complete
+        ..onUncaughtError = errors.complete
         ..global['tool'] = JSFunction.createFromHostFunction(rt, (rt, _, _) {
           return JSPromise.fromAsyncFunction(rt, () async {
             await Future<void>.delayed(const Duration(milliseconds: 20));

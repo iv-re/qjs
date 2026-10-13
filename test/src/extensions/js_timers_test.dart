@@ -76,6 +76,22 @@ void main() {
       expect(rt.global['result'].asDartString, equals('foobar'));
     });
 
+    test('errors in timer callbacks go to onUncaughtError', () async {
+      final errors = <String>[];
+      rt.onUncaughtError = (e) {
+        errors.add(e.value.asObject['message'].asDartString);
+      };
+      rt.evaluateJavascript('''
+        setTimeout(() => { throw new Error('tick failed'); }, 1);
+        var after = 0;
+        setTimeout(() => { after = 1; }, 5);
+      ''');
+
+      await timers.resolved;
+      expect(errors, ['tick failed']);
+      expect(rt.global['after'].asNumber, 1);
+    });
+
     test('setTimeout throws when callback is not a function', () {
       expect(
         () => rt.evaluateJavascript('setTimeout(42, 10)'),

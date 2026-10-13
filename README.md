@@ -71,6 +71,55 @@ sandboxRt.release();
 
 `JSRuntimeConfig.hardened()` disables `eval` and `Proxy`, and restricts `memoryLimit` to 64 MB and `maxStackSize` to 512 KB.
 
+### Sandbox Controls
+
+```dart
+// Interrupt scripts that run for too long. The interrupted code throws an
+// uncatchable `InternalError: interrupted`, surfaced as a JSException.
+// The deadline stays in effect until cleared or replaced.
+rt.setDeadline(const Duration(seconds: 30));
+rt.clearDeadline();
+
+// Interrupt the running script right away, e.g. from a host function.
+rt.requestInterrupt();
+
+// Inspect memory usage.
+final usage = rt.memoryUsage;
+print('${usage.mallocSize} of ${usage.mallocLimit} bytes');
+
+// Track rejected promises that have no handler.
+rt.onUnhandledRejection = (promise, reason, isHandled) {
+  if (!isHandled) print('Unhandled rejection: $reason');
+};
+
+// Collect garbage between script runs.
+rt.runGC();
+```
+
+To cancel a script on demand, for example when the user stops a request, run the runtime in a worker isolate and send its `interruptHandle` to the isolate that decides when to cancel:
+
+```dart
+// Worker isolate: owns the runtime and may block in JavaScript.
+void worker(SendPort supervisor) {
+  final rt = JSRuntime.create();
+  supervisor.send(rt.interruptHandle);
+  try {
+    rt.evaluateJavascript(untrustedScript);
+  } on JSException catch (e) {
+    // `InternalError: interrupted` if the supervisor cancelled the script.
+  } finally {
+    rt.release();
+  }
+}
+
+// Supervisor isolate: stays responsive and cancels the script when needed.
+final port = ReceivePort();
+await Isolate.spawn(worker, port.sendPort);
+final handle = await port.first as JSInterruptHandle;
+// ... later, e.g. when the user stops the request:
+handle.requestInterrupt(); // false if the runtime is already released
+```
+
 ---
 
 ## Code Evaluation

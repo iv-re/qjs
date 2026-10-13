@@ -459,6 +459,11 @@ external void qjs_register_pointer(
   ffi.Pointer<QJSABIManagedPointer> ptr,
 );
 
+@ffi.Native<ffi.Void Function(ffi.Pointer<QJSABIRuntime>)>()
+external void qjs_runtime_clear_deadline(
+  ffi.Pointer<QJSABIRuntime> rt,
+);
+
 @ffi.Native<ffi.Pointer<QJSABIRuntime> Function(QJSABIRuntimeConfig)>()
 external ffi.Pointer<QJSABIRuntime> qjs_runtime_create(
   QJSABIRuntimeConfig config,
@@ -483,6 +488,16 @@ qjs_runtime_get_and_clear_native_exception_message(
 
 @ffi.Native<QJSABIObject Function(ffi.Pointer<QJSABIRuntime>)>()
 external QJSABIObject qjs_runtime_get_global_object(
+  ffi.Pointer<QJSABIRuntime> rt,
+);
+
+@ffi.Native<ffi.Uint64 Function(ffi.Pointer<QJSABIRuntime>)>()
+external int qjs_runtime_get_id(
+  ffi.Pointer<QJSABIRuntime> rt,
+);
+
+@ffi.Native<QJSABIMemoryUsage Function(ffi.Pointer<QJSABIRuntime>)>()
+external QJSABIMemoryUsage qjs_runtime_get_memory_usage(
   ffi.Pointer<QJSABIRuntime> rt,
 );
 
@@ -522,6 +537,23 @@ external void qjs_runtime_release_from_finalizer(
   ffi.Pointer<QJSABIRuntime> rt,
 );
 
+@ffi.Native<ffi.Bool Function(ffi.Pointer<QJSABIRuntime>, ffi.Uint64)>()
+external bool qjs_runtime_request_interrupt(
+  ffi.Pointer<QJSABIRuntime> rt,
+  int id,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<QJSABIRuntime>)>()
+external void qjs_runtime_run_gc(
+  ffi.Pointer<QJSABIRuntime> rt,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<QJSABIRuntime>, ffi.Uint64)>()
+external void qjs_runtime_set_deadline(
+  ffi.Pointer<QJSABIRuntime> rt,
+  int timeout_us,
+);
+
 @ffi.Native<ffi.Void Function(ffi.Pointer<QJSABIRuntime>, QJSABIValue)>()
 external void qjs_runtime_set_js_error_value(
   ffi.Pointer<QJSABIRuntime> rt,
@@ -534,6 +566,14 @@ external void qjs_runtime_set_js_error_value(
 external void qjs_runtime_set_native_exception_message(
   ffi.Pointer<QJSABIRuntime> rt,
   ffi.Pointer<ffi.Char> message,
+);
+
+@ffi.Native<
+  ffi.Void Function(ffi.Pointer<QJSABIRuntime>, QJSABIPromiseRejectionTracker)
+>()
+external void qjs_runtime_set_promise_rejection_tracker(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIPromiseRejectionTracker tracker,
 );
 
 @ffi.Native<
@@ -754,6 +794,142 @@ final class QJSABIManagedPointerVTable extends ffi.Struct {
   }) => $allocator<QJSABIManagedPointerVTable>()..ref.invalidate = invalidate;
 }
 
+final class QJSABIMemoryUsage extends ffi.Struct {
+  @ffi.Int64()
+  external int malloc_size;
+
+  @ffi.Int64()
+  external int malloc_limit;
+
+  @ffi.Int64()
+  external int memory_used_size;
+
+  @ffi.Int64()
+  external int malloc_count;
+
+  @ffi.Int64()
+  external int memory_used_count;
+
+  @ffi.Int64()
+  external int atom_count;
+
+  @ffi.Int64()
+  external int atom_size;
+
+  @ffi.Int64()
+  external int str_count;
+
+  @ffi.Int64()
+  external int str_size;
+
+  @ffi.Int64()
+  external int obj_count;
+
+  @ffi.Int64()
+  external int obj_size;
+
+  @ffi.Int64()
+  external int prop_count;
+
+  @ffi.Int64()
+  external int prop_size;
+
+  @ffi.Int64()
+  external int shape_count;
+
+  @ffi.Int64()
+  external int shape_size;
+
+  @ffi.Int64()
+  external int js_func_count;
+
+  @ffi.Int64()
+  external int js_func_size;
+
+  @ffi.Int64()
+  external int js_func_code_size;
+
+  @ffi.Int64()
+  external int js_func_pc2line_count;
+
+  @ffi.Int64()
+  external int js_func_pc2line_size;
+
+  @ffi.Int64()
+  external int c_func_count;
+
+  @ffi.Int64()
+  external int array_count;
+
+  @ffi.Int64()
+  external int fast_array_count;
+
+  @ffi.Int64()
+  external int fast_array_elements;
+
+  @ffi.Int64()
+  external int binary_object_count;
+
+  @ffi.Int64()
+  external int binary_object_size;
+
+  static ffi.Pointer<QJSABIMemoryUsage> $allocate(
+    ffi.Allocator $allocator, {
+    required int malloc_size,
+    required int malloc_limit,
+    required int memory_used_size,
+    required int malloc_count,
+    required int memory_used_count,
+    required int atom_count,
+    required int atom_size,
+    required int str_count,
+    required int str_size,
+    required int obj_count,
+    required int obj_size,
+    required int prop_count,
+    required int prop_size,
+    required int shape_count,
+    required int shape_size,
+    required int js_func_count,
+    required int js_func_size,
+    required int js_func_code_size,
+    required int js_func_pc2line_count,
+    required int js_func_pc2line_size,
+    required int c_func_count,
+    required int array_count,
+    required int fast_array_count,
+    required int fast_array_elements,
+    required int binary_object_count,
+    required int binary_object_size,
+  }) => $allocator<QJSABIMemoryUsage>()
+    ..ref.malloc_size = malloc_size
+    ..ref.malloc_limit = malloc_limit
+    ..ref.memory_used_size = memory_used_size
+    ..ref.malloc_count = malloc_count
+    ..ref.memory_used_count = memory_used_count
+    ..ref.atom_count = atom_count
+    ..ref.atom_size = atom_size
+    ..ref.str_count = str_count
+    ..ref.str_size = str_size
+    ..ref.obj_count = obj_count
+    ..ref.obj_size = obj_size
+    ..ref.prop_count = prop_count
+    ..ref.prop_size = prop_size
+    ..ref.shape_count = shape_count
+    ..ref.shape_size = shape_size
+    ..ref.js_func_count = js_func_count
+    ..ref.js_func_size = js_func_size
+    ..ref.js_func_code_size = js_func_code_size
+    ..ref.js_func_pc2line_count = js_func_pc2line_count
+    ..ref.js_func_pc2line_size = js_func_pc2line_size
+    ..ref.c_func_count = c_func_count
+    ..ref.array_count = array_count
+    ..ref.fast_array_count = fast_array_count
+    ..ref.fast_array_elements = fast_array_elements
+    ..ref.binary_object_count = binary_object_count
+    ..ref.binary_object_size = binary_object_size;
+}
+
 typedef QJSABIMutableBufferRelease =
     ffi.Pointer<ffi.NativeFunction<QJSABIMutableBufferReleaseFunction>>;
 typedef QJSABIMutableBufferReleaseFunction = ffi.Void Function(
@@ -803,6 +979,21 @@ final class QJSABIPreparedJavaScriptOrError extends ffi.Struct {
       $allocator<QJSABIPreparedJavaScriptOrError>()
         ..ref.ptr_or_error = ptr_or_error;
 }
+
+typedef QJSABIPromiseRejectionTracker =
+    ffi.Pointer<ffi.NativeFunction<QJSABIPromiseRejectionTrackerFunction>>;
+typedef QJSABIPromiseRejectionTrackerFunction = ffi.Void Function(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIValue promise,
+  QJSABIValue reason,
+  ffi.Bool is_handled,
+);
+typedef DartQJSABIPromiseRejectionTrackerFunction = void Function(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIValue promise,
+  QJSABIValue reason,
+  bool is_handled,
+);
 
 final class QJSABIPropNameID extends ffi.Struct {
   external ffi.Pointer<QJSABIManagedPointer> pointer;

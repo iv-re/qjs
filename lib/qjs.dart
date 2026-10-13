@@ -11,6 +11,7 @@ export 'src/js_promise.dart';
 export 'src/js_prop_id.dart';
 export 'src/js_runtime.dart';
 export 'src/js_runtime_config.dart';
+export 'src/js_runtime_controls.dart';
 export 'src/js_string.dart';
 export 'src/js_symbol.dart';
 export 'src/js_value.dart';

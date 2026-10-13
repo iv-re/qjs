@@ -148,6 +148,31 @@ typedef void (*QJSABIMutableBufferRelease)(void *user_data);
 
 typedef void (*QJSABINativeStateRelease)(void *user_data);
 
+// Receives owned references to `promise` and `reason`.
+typedef void (*QJSABIPromiseRejectionTracker)(
+  struct QJSABIRuntime *rt,
+  struct QJSABIValue promise,
+  struct QJSABIValue reason,
+  bool is_handled
+);
+
+// Mirrors JSMemoryUsage.
+struct QJSABIMemoryUsage {
+  int64_t malloc_size, malloc_limit, memory_used_size;
+  int64_t malloc_count;
+  int64_t memory_used_count;
+  int64_t atom_count, atom_size;
+  int64_t str_count, str_size;
+  int64_t obj_count, obj_size;
+  int64_t prop_count, prop_size;
+  int64_t shape_count, shape_size;
+  int64_t js_func_count, js_func_size, js_func_code_size;
+  int64_t js_func_pc2line_count, js_func_pc2line_size;
+  int64_t c_func_count, array_count;
+  int64_t fast_array_count, fast_array_elements;
+  int64_t binary_object_count, binary_object_size;
+};
+
 struct QJSABIRuntimeConfig {
   bool enable_eval;
   bool es6_proxy;
@@ -239,6 +264,32 @@ struct QJSABIRuntime *qjs_runtime_create(
 
 void qjs_runtime_release(struct QJSABIRuntime *rt);
 void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt);
+
+// Sandbox controls
+
+// Interrupts JS execution once `timeout_us` microseconds have passed. The
+// deadline stays in effect until cleared or replaced, so every later
+// execution is interrupted immediately once it has passed.
+void qjs_runtime_set_deadline(struct QJSABIRuntime *rt, uint64_t timeout_us);
+void qjs_runtime_clear_deadline(struct QJSABIRuntime *rt);
+
+// Unique id of a live runtime, for qjs_runtime_request_interrupt.
+uint64_t qjs_runtime_get_id(struct QJSABIRuntime *rt);
+
+// Interrupts the running JS execution, or the next one if none is running.
+// Safe to call from any thread, and with a runtime that has already been
+// released: returns false if `rt` with this `id` is no longer alive.
+bool qjs_runtime_request_interrupt(struct QJSABIRuntime *rt, uint64_t id);
+
+struct QJSABIMemoryUsage qjs_runtime_get_memory_usage(struct QJSABIRuntime *rt);
+
+// Pass NULL to remove the tracker.
+void qjs_runtime_set_promise_rejection_tracker(
+  struct QJSABIRuntime *rt,
+  QJSABIPromiseRejectionTracker tracker
+);
+
+void qjs_runtime_run_gc(struct QJSABIRuntime *rt);
 
 struct QJSABIObject qjs_runtime_get_global_object(
   struct QJSABIRuntime *rt

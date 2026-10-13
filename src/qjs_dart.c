@@ -17,6 +17,11 @@ typedef CRITICAL_SECTION qjs_mutex_t;
 typedef volatile LONG qjs_refcount_t;
 #define qjs_refcount_inc(p) InterlockedIncrement(p)
 #define qjs_refcount_dec(p) InterlockedDecrement(p)
+typedef volatile LONG qjs_atomic_flag_t;
+#define qjs_atomic_flag_exchange(p, v) InterlockedExchange((p), (v))
+static SRWLOCK g_live_runtimes_lock = SRWLOCK_INIT;
+#define qjs_live_runtimes_lock() AcquireSRWLockExclusive(&g_live_runtimes_lock)
+#define qjs_live_runtimes_unlock() ReleaseSRWLockExclusive(&g_live_runtimes_lock)
 #else
 #include <pthread.h>
 typedef pthread_mutex_t qjs_mutex_t;
@@ -27,6 +32,11 @@ typedef pthread_mutex_t qjs_mutex_t;
 typedef int qjs_refcount_t;
 #define qjs_refcount_inc(p) __atomic_add_fetch(p, 1, __ATOMIC_RELAXED)
 #define qjs_refcount_dec(p) __atomic_sub_fetch(p, 1, __ATOMIC_ACQ_REL)
+typedef int qjs_atomic_flag_t;
+#define qjs_atomic_flag_exchange(p, v) __atomic_exchange_n((p), (v), __ATOMIC_ACQ_REL)
+static pthread_mutex_t g_live_runtimes_lock = PTHREAD_MUTEX_INITIALIZER;
+#define qjs_live_runtimes_lock() pthread_mutex_lock(&g_live_runtimes_lock)
+#define qjs_live_runtimes_unlock() pthread_mutex_unlock(&g_live_runtimes_lock)
 #endif
 
 #include <stdbool.h>
@@ -34,6 +44,7 @@ typedef int qjs_refcount_t;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_STACK_ARGS 8
 
@@ -83,6 +94,16 @@ struct QJSABIRuntime {
   // until the last reference is dropped, so finalizers can always lock it.
   qjs_refcount_t refcount;
   QJSPendingFree * volatile pending_frees;
+  // Sandbox controls. deadline_us is only touched on the isolate's thread;
+  // interrupt_requested may be set from any thread.
+  uint64_t deadline_us;
+  qjs_atomic_flag_t interrupt_requested;
+  QJSABIPromiseRejectionTracker rejection_tracker;
+  // Registry of live runtimes, guarded by g_live_runtimes_lock, so that
+  // qjs_runtime_request_interrupt never touches a released runtime.
+  uint64_t id;
+  struct QJSABIRuntime *live_prev;
+  struct QJSABIRuntime *live_next;
   void *temp_string_buf;
   JSAtom native_state_atom;
   bool microtask_queue;
@@ -94,6 +115,54 @@ static void drain_jobs_if_needed(struct QJSABIRuntime *rt) {
     JSContext *pctx;
     while (JS_ExecutePendingJob(rt->rt, &pctx) > 0);
   }
+}
+
+static struct QJSABIRuntime *g_live_runtimes_head;
+static uint64_t g_next_runtime_id = 1;
+
+static void live_runtimes_add(struct QJSABIRuntime *rt) {
+  qjs_live_runtimes_lock();
+  rt->id = g_next_runtime_id++;
+  rt->live_prev = NULL;
+  rt->live_next = g_live_runtimes_head;
+  if (g_live_runtimes_head) g_live_runtimes_head->live_prev = rt;
+  g_live_runtimes_head = rt;
+  qjs_live_runtimes_unlock();
+}
+
+static void live_runtimes_remove(struct QJSABIRuntime *rt) {
+  qjs_live_runtimes_lock();
+  if (rt->live_prev) {
+    rt->live_prev->live_next = rt->live_next;
+  } else if (g_live_runtimes_head == rt) {
+    g_live_runtimes_head = rt->live_next;
+  }
+  if (rt->live_next) rt->live_next->live_prev = rt->live_prev;
+  rt->live_prev = NULL;
+  rt->live_next = NULL;
+  qjs_live_runtimes_unlock();
+}
+
+static uint64_t monotonic_now_us(void) {
+#ifdef _WIN32
+  LARGE_INTEGER freq, counter;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&counter);
+  return (uint64_t)(counter.QuadPart / freq.QuadPart) * 1000000u +
+         (uint64_t)(counter.QuadPart % freq.QuadPart) * 1000000u / (uint64_t)freq.QuadPart;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+#endif
+}
+
+// Polled by QuickJS every few thousand operations; must not call into Dart.
+static int interrupt_handler(JSRuntime *js_rt, void *opaque) {
+  (void)js_rt;
+  struct QJSABIRuntime *rt = (struct QJSABIRuntime *)opaque;
+  if (qjs_atomic_flag_exchange(&rt->interrupt_requested, 0)) return 1;
+  return rt->deadline_us != 0 && monotonic_now_us() >= rt->deadline_us;
 }
 
 static void runtime_retain(struct QJSABIRuntime *rt) {
@@ -698,11 +767,14 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   rt->refcount = 1;
   rt->pending_frees = NULL;
   rt->microtask_queue = config.microtask_queue;
+  JS_SetInterruptHandler(rt->rt, interrupt_handler, rt);
+  live_runtimes_add(rt);
   return rt;
 }
 
 void qjs_runtime_release(struct QJSABIRuntime *rt) {
   if (!rt) return;
+  live_runtimes_remove(rt);
 
   // Only detach the lists under the lock. Freeing JS values can run JS
   // finalizers that call into Dart, and doing that with free_mutex held
@@ -771,6 +843,74 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
 
 void qjs_runtime_release_from_finalizer(struct QJSABIRuntime *rt) {
   qjs_runtime_release(rt);
+}
+
+// Sandbox controls
+
+void qjs_runtime_set_deadline(struct QJSABIRuntime *rt, uint64_t timeout_us) {
+  uint64_t deadline = monotonic_now_us() + timeout_us;
+  // 0 means "no deadline", and an overflow means "never".
+  rt->deadline_us = deadline < timeout_us ? 0 : (deadline == 0 ? 1 : deadline);
+}
+
+void qjs_runtime_clear_deadline(struct QJSABIRuntime *rt) {
+  rt->deadline_us = 0;
+}
+
+uint64_t qjs_runtime_get_id(struct QJSABIRuntime *rt) {
+  return rt->id;
+}
+
+bool qjs_runtime_request_interrupt(struct QJSABIRuntime *rt, uint64_t id) {
+  bool found = false;
+  qjs_live_runtimes_lock();
+  for (struct QJSABIRuntime *curr = g_live_runtimes_head; curr; curr = curr->live_next) {
+    if (curr == rt && curr->id == id) {
+      qjs_atomic_flag_exchange(&curr->interrupt_requested, 1);
+      found = true;
+      break;
+    }
+  }
+  qjs_live_runtimes_unlock();
+  return found;
+}
+
+_Static_assert(sizeof(struct QJSABIMemoryUsage) == sizeof(JSMemoryUsage),
+               "QJSABIMemoryUsage must mirror JSMemoryUsage");
+
+struct QJSABIMemoryUsage qjs_runtime_get_memory_usage(struct QJSABIRuntime *rt) {
+  JSMemoryUsage usage;
+  JS_ComputeMemoryUsage(rt->rt, &usage);
+  struct QJSABIMemoryUsage res;
+  memcpy(&res, &usage, sizeof(res));
+  return res;
+}
+
+static void promise_rejection_tracker(
+  JSContext *ctx,
+  JSValueConst promise,
+  JSValueConst reason,
+  bool is_handled,
+  void *opaque
+) {
+  struct QJSABIRuntime *rt = (struct QJSABIRuntime *)opaque;
+  if (!rt->rejection_tracker) return;
+  struct QJSABIValue abi_promise = to_qjs_abi_value(rt, JS_DupValue(ctx, promise));
+  struct QJSABIValue abi_reason = to_qjs_abi_value(rt, JS_DupValue(ctx, reason));
+  rt->rejection_tracker(rt, abi_promise, abi_reason, is_handled);
+}
+
+void qjs_runtime_set_promise_rejection_tracker(
+  struct QJSABIRuntime *rt,
+  QJSABIPromiseRejectionTracker tracker
+) {
+  rt->rejection_tracker = tracker;
+  JS_SetHostPromiseRejectionTracker(rt->rt, tracker ? promise_rejection_tracker : NULL, rt);
+}
+
+void qjs_runtime_run_gc(struct QJSABIRuntime *rt) {
+  flush_pending_frees(rt);
+  JS_RunGC(rt->rt);
 }
 
 struct QJSABIObject qjs_runtime_get_global_object(struct QJSABIRuntime *rt) {

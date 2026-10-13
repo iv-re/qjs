@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
@@ -8,6 +9,7 @@ import 'package:qjs/src/js_object.dart';
 import 'package:qjs/src/js_pointer.dart';
 import 'package:qjs/src/js_prepared_javascript.dart';
 import 'package:qjs/src/js_runtime_config.dart';
+import 'package:qjs/src/js_runtime_controls.dart';
 import 'package:qjs/src/js_value.dart';
 
 final Map<int, WeakReference<JSRuntime>> _runtimesRegistry = {};
@@ -123,6 +125,55 @@ class JSRuntime implements Finalizable {
     return JSValue.fromABI(this, result.value);
   }
 
+  /// Interrupts JavaScript execution once [timeout] has passed from now.
+  ///
+  /// The interrupted code throws an uncatchable `InternalError: interrupted`,
+  /// which surfaces as a [JSException]; the runtime stays usable. The
+  /// deadline stays in effect until [clearDeadline] or the next
+  /// [setDeadline], so once it has passed every later execution, including
+  /// pending microtasks, is interrupted immediately.
+  void setDeadline(Duration timeout) {
+    qjs_runtime_set_deadline(
+      ptr,
+      timeout.isNegative ? 0 : timeout.inMicroseconds,
+    );
+  }
+
+  /// Removes the deadline set by [setDeadline].
+  void clearDeadline() => qjs_runtime_clear_deadline(ptr);
+
+  /// A handle that interrupts this runtime from any isolate.
+  JSInterruptHandle get interruptHandle =>
+      JSInterruptHandle(ptr.address, qjs_runtime_get_id(ptr));
+
+  /// Interrupts the running JavaScript execution, or the next one if none
+  /// is running. See [JSInterruptHandle.requestInterrupt].
+  void requestInterrupt() => interruptHandle.requestInterrupt();
+
+  /// The runtime's current memory usage.
+  JSMemoryUsage get memoryUsage =>
+      JSMemoryUsage.fromABI(qjs_runtime_get_memory_usage(ptr));
+
+  /// Runs the JavaScript garbage collector.
+  void runGC() => qjs_runtime_run_gc(ptr);
+
+  JSUnhandledRejectionCallback? _onUnhandledRejection;
+
+  /// Called when a promise is rejected without a handler, and again if a
+  /// handler is attached later. Set to null to stop tracking.
+  JSUnhandledRejectionCallback? get onUnhandledRejection =>
+      _onUnhandledRejection;
+
+  set onUnhandledRejection(JSUnhandledRejectionCallback? callback) {
+    _onUnhandledRejection = callback;
+    qjs_runtime_set_promise_rejection_tracker(
+      ptr,
+      callback == null
+          ? nullptr
+          : _promiseRejectionTrackerCallable.nativeFunction,
+    );
+  }
+
   /// Drains the microtask queue.
   bool drainMicrotasks({int maxMicrotasksHint = -1}) {
     return qjs_runtime_drain_microtasks(ptr, maxMicrotasksHint);
@@ -200,3 +251,25 @@ class JSRuntime implements Finalizable {
     _released = true;
   }
 }
+
+final _promiseRejectionTrackerCallable =
+    NativeCallable<QJSABIPromiseRejectionTrackerFunction>.isolateLocal((
+      Pointer<QJSABIRuntime> runtime,
+      QJSABIValue promise,
+      QJSABIValue reason,
+      bool isHandled,
+    ) {
+      final rt = JSRuntime(runtime);
+      // The native side passes owned references.
+      final promiseValue = JSValue.fromABI(rt, promise);
+      final reasonValue = JSValue.fromABI(rt, reason);
+      final callback = rt._onUnhandledRejection;
+      if (callback == null) return;
+      try {
+        callback(promiseValue, reasonValue, isHandled);
+      } catch (error, stackTrace) {
+        // Throwing here would unwind through QuickJS; report it as an
+        // uncaught async error instead.
+        scheduleMicrotask(() => Error.throwWithStackTrace(error, stackTrace));
+      }
+    });

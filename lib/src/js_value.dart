@@ -85,18 +85,16 @@ class JSValue implements Finalizable {
   /// Parses a UTF-8 JSON byte array into a [JSValue].
   factory JSValue.fromJsonUtf8(JSRuntime rt, Uint8List jsonBytes) =>
       using((arena) {
-        final nativeBytes = malloc<Uint8>(jsonBytes.length);
+        // JS_ParseJSON requires a NUL-terminated buffer.
+        final nativeBytes = arena<Uint8>(jsonBytes.length + 1);
         nativeBytes.asTypedList(jsonBytes.length).setAll(0, jsonBytes);
-        try {
-          final result = qjs_value_create_from_json_utf8(
-            rt.ptr,
-            nativeBytes,
-            jsonBytes.length,
-          );
-          return JSValue.fromABI(rt, result.value);
-        } finally {
-          malloc.free(nativeBytes);
-        }
+        nativeBytes[jsonBytes.length] = 0;
+        final result = qjs_value_create_from_json_utf8(
+          rt.ptr,
+          nativeBytes,
+          jsonBytes.length,
+        );
+        return JSValue.fromABI(rt, result.value);
       });
 
   @internal

@@ -466,27 +466,51 @@ static int host_object_set_property(
   return 0;
 }
 
-static int host_object_has_property(JSContext *ctx, JSValueConst obj, JSAtom atom) {
-  (void)ctx;
-  QJSHostObjectBridge *bridge = (QJSHostObjectBridge *)get_opaque_safe(obj);
-  if (bridge && bridge->get_own_keys_cb) {
-    struct QJSABIPropNameIDListPtrOrError keysRes = bridge->get_own_keys_cb(bridge->user_data, bridge->rt);
-    if (!is_error_ptr(keysRes.ptr_or_error)) {
-      struct QJSABIPropNameIDList *list = (struct QJSABIPropNameIDList *)keysRes.ptr_or_error;
-      if (list) {
-        int found = 0;
-        for (size_t i = 0; i < list->size; i++) {
-          if (get_js_atom(list->props[i].pointer) == atom) {
-            found = 1;
-            break;
-          }
-        }
-        if (list->vtable && list->vtable->release) list->vtable->release(list);
-        return found;
-      }
+// A host object owns exactly the keys its getOwnKeys callback returns.
+// Returns 1 if `atom` is one of them, 0 if not, -1 with a pending exception.
+static int host_object_has_own_key(JSContext *ctx, QJSHostObjectBridge *bridge, JSAtom atom) {
+  if (!bridge || !bridge->get_own_keys_cb) return 0;
+  struct QJSABIPropNameIDListPtrOrError keysRes = bridge->get_own_keys_cb(bridge->user_data, bridge->rt);
+  if (is_error_ptr(keysRes.ptr_or_error)) {
+    raise_abi_error(bridge->rt, ctx, (int)get_error_from_ptr(keysRes.ptr_or_error));
+    return -1;
+  }
+  struct QJSABIPropNameIDList *list = (struct QJSABIPropNameIDList *)keysRes.ptr_or_error;
+  if (!list) return 0;
+  int found = 0;
+  for (size_t i = 0; i < list->size; i++) {
+    if (get_js_atom(list->props[i].pointer) == atom) {
+      found = 1;
+      break;
     }
   }
-  return 0;
+  if (list->vtable && list->vtable->release) list->vtable->release(list);
+  return found;
+}
+
+static int host_object_has_property(JSContext *ctx, JSValueConst obj, JSAtom atom) {
+  return host_object_has_own_key(ctx, (QJSHostObjectBridge *)get_opaque_safe(obj), atom);
+}
+
+// Needed for Object.keys, for-in and JSON.stringify: QuickJS asks it whether
+// each key returned by get_own_property_names is enumerable.
+static int host_object_get_own_property(
+  JSContext *ctx,
+  JSPropertyDescriptor *desc,
+  JSValueConst obj,
+  JSAtom atom
+) {
+  QJSHostObjectBridge *bridge = (QJSHostObjectBridge *)get_opaque_safe(obj);
+  int found = host_object_has_own_key(ctx, bridge, atom);
+  if (found <= 0 || !desc) return found;
+
+  JSValue value = host_object_get_property(ctx, obj, atom, obj);
+  if (JS_IsException(value)) return -1;
+  desc->flags = JS_PROP_ENUMERABLE | JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE;
+  desc->value = value;
+  desc->getter = JS_UNDEFINED;
+  desc->setter = JS_UNDEFINED;
+  return 1;
 }
 
 static int host_object_get_own_property_names(
@@ -523,6 +547,7 @@ static int host_object_get_own_property_names(
 }
 
 static const JSClassExoticMethods g_host_object_exotic = {
+  .get_own_property = host_object_get_own_property,
   .get_property = host_object_get_property,
   .set_property = host_object_set_property,
   .has_property = host_object_has_property,

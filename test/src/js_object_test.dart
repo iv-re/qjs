@@ -131,6 +131,37 @@ void main() {
         List.generate(names.length, (i) => names[i].asDartString),
         unorderedEquals(['a', 'b']),
       );
+
+      String js(String code) => rt.evaluateJavascript(code).asDartString;
+      expect(js('JSON.stringify(Object.keys(h).sort())'), '["a","b"]');
+      expect(
+        js('var r = []; for (var k in h) r.push(k); JSON.stringify(r.sort())'),
+        '["a","b"]',
+      );
+      expect(js('JSON.stringify(h)'), anyOf('{"a":1,"b":2}', '{"b":2,"a":1}'));
+      expect(
+        js('JSON.stringify(Object.entries(h).sort())'),
+        '[["a",1],["b",2]]',
+      );
+      bool hasOwn(String key) => rt
+          .evaluateJavascript('Object.prototype.hasOwnProperty.call(h, "$key")')
+          .asBoolean;
+      expect(hasOwn('a'), isTrue);
+      expect(hasOwn('z'), isFalse);
+    });
+
+    test('host object keys error propagates through in', () {
+      final hostObj = MockHostObject()..throwGenericKeys = true;
+      rt.global['h'] = JSObject.createFromHostObject(rt, hostObj).asValue;
+      final res = rt.evaluateJavascript('''
+        try {
+          "a" in h;
+          "no error";
+        } catch (e) {
+          e.toString();
+        }
+      ''');
+      expect(res.asDartString, contains('generic keys error'));
     });
 
     test('native state', () {

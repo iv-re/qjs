@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:isolate';
 
 import 'package:qjs/qjs.dart';
@@ -68,6 +69,53 @@ void main() {
             .asNumber,
         1e5,
       );
+    });
+  });
+
+  group('interrupt in microtasks', () {
+    test('is thrown from the call that ran them', () {
+      rt.setDeadline(const Duration(milliseconds: 50));
+      expect(
+        () => rt.evaluateJavascript(
+          '(async () => { await null; while (true) {} })(); "sync part done"',
+        ),
+        _throwsInterrupted,
+      );
+    });
+
+    test('is thrown from drainMicrotasks', () {
+      final queued = JSRuntime.create(
+        const JSRuntimeConfig(microtaskQueue: true),
+      );
+      addTearDown(queued.release);
+
+      queued.evaluateJavascript(
+        '(async () => { await null; while (true) {} })()',
+      );
+      queued.setDeadline(const Duration(milliseconds: 50));
+      expect(queued.drainMicrotasks, _throwsInterrupted);
+
+      queued.clearDeadline();
+      expect(queued.drainMicrotasks(), isTrue);
+    });
+
+    test('after awaiting a host call goes to onMicrotaskError', () async {
+      final errors = Completer<JSException>();
+      rt
+        ..onMicrotaskError = errors.complete
+        ..global['tool'] = JSFunction.createFromHostFunction(rt, (rt, _, _) {
+          return JSPromise.fromAsyncFunction(rt, () async {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            return JSValue.number(rt, 1);
+          });
+        }).asValue
+        ..setDeadline(const Duration(milliseconds: 300));
+
+      rt.evaluateJavascript(
+        '(async () => { await tool(); while (true) {} })(); undefined',
+      );
+      final error = await errors.future.timeout(const Duration(seconds: 5));
+      expect(error.value.asObject['message'].asDartString, 'interrupted');
     });
   });
 

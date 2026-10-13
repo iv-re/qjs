@@ -174,9 +174,24 @@ class JSRuntime implements Finalizable {
     );
   }
 
+  /// Called with errors from JavaScript that the runtime runs on its own
+  /// with no Dart caller to throw to: currently, microtasks that fail while
+  /// a `JSPromise.fromAsyncFunction` result resolves the JS promise. A
+  /// script interrupted by [setDeadline] after awaiting a host call ends up
+  /// here, and its own promise never settles.
+  ///
+  /// If null, such errors are dropped.
+  void Function(JSException error)? onMicrotaskError;
+
   /// Drains the microtask queue.
+  ///
+  /// Throws a [JSException] if a microtask fails, for example because the
+  /// script was interrupted; the remaining microtasks stay queued.
   bool drainMicrotasks({int maxMicrotasksHint = -1}) {
-    return qjs_runtime_drain_microtasks(ptr, maxMicrotasksHint);
+    if (!qjs_runtime_drain_microtasks(ptr, maxMicrotasksHint)) {
+      throw JSException(getAndClearJSErrorValue());
+    }
+    return true;
   }
 
   JSValue getAndClearJSErrorValue() {

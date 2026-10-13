@@ -66,10 +66,20 @@ extension type JSPromise._(JSValue value) implements JSValue {
   ) {
     final (promise, resolve, reject) = JSPromise.withResolvers(rt);
 
+    // Settling the promise runs the script's continuations, which may fail
+    // (e.g. when interrupted). Nobody awaits this callback, so report it.
+    void settle(JSFunction settler, JSValue value) {
+      try {
+        settler([value]);
+      } on JSException catch (error) {
+        rt.onMicrotaskError?.call(error);
+      }
+    }
+
     fn().then(
       (it) {
         if (!rt.isReleased) {
-          resolve([it]);
+          settle(resolve, it);
         }
       },
       onError: (Object error, StackTrace stack) {
@@ -78,7 +88,7 @@ extension type JSPromise._(JSValue value) implements JSValue {
               ? error.value
               : JSError.create(rt, error.toString());
 
-          reject([errValue]);
+          settle(reject, errValue);
         }
       },
     );

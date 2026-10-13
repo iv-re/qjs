@@ -110,11 +110,17 @@ struct QJSABIRuntime {
   bool is_released;
 };
 
-static void drain_jobs_if_needed(struct QJSABIRuntime *rt) {
+// Runs pending jobs unless the embedder drains them itself. Returns -1 with
+// a pending exception if a job fails (e.g. it was interrupted); the remaining
+// jobs stay queued.
+static int drain_jobs_if_needed(struct QJSABIRuntime *rt) {
   if (rt && !rt->microtask_queue && rt->rt) {
     JSContext *pctx;
-    while (JS_ExecutePendingJob(rt->rt, &pctx) > 0);
+    int ret;
+    while ((ret = JS_ExecutePendingJob(rt->rt, &pctx)) > 0);
+    if (ret < 0) return -1;
   }
+  return 0;
 }
 
 static struct QJSABIRuntime *g_live_runtimes_head;
@@ -406,6 +412,17 @@ static struct QJSABIValueOrError return_val_or_error(struct QJSABIRuntime *rt, J
     res.value = to_qjs_abi_value(rt, val);
   }
   return res;
+}
+
+// Converts the result of a top-level call, after draining the jobs it queued.
+// A failing job turns the whole call into an error, so it is not lost.
+static struct QJSABIValue finish_top_level_call(struct QJSABIRuntime *rt, JSValue val) {
+  if (JS_IsException(val)) return return_js_error_val(rt);
+  if (drain_jobs_if_needed(rt) < 0) {
+    JS_FreeValue(rt->ctx, val);
+    return return_js_error_val(rt);
+  }
+  return to_qjs_abi_value(rt, val);
 }
 
 static JSValue from_qjs_abi_value(struct QJSABIRuntime *rt, const struct QJSABIValue *val) {
@@ -976,9 +993,7 @@ struct QJSABIValue qjs_evaluate_javascript(
   const char *source_url
 ) {
   JSValue val = JS_Eval(rt->ctx, (const char *)script, script_len, source_url ? source_url : "<eval>", JS_EVAL_TYPE_GLOBAL);
-  if (JS_IsException(val)) return return_js_error_val(rt);
-  drain_jobs_if_needed(rt);
-  return to_qjs_abi_value(rt, val);
+  return finish_top_level_call(rt, val);
 }
 
 struct QJSABIPreparedJavaScriptOrError qjs_runtime_prepared_javascript_create(
@@ -1033,8 +1048,8 @@ struct QJSABIValueOrError qjs_runtime_prepared_javascript_evaluate(
     return res;
   }
   JSValue result = JS_EvalFunction(rt->ctx, JS_DupValue(rt->ctx, prepared->func_obj));
-  drain_jobs_if_needed(rt);
-  return return_val_or_error(rt, result);
+  struct QJSABIValueOrError res = { .value = finish_top_level_call(rt, result) };
+  return res;
 }
 
 void qjs_preparedjavascript_release(struct QJSABIPreparedJavaScript *prepared) {
@@ -1070,7 +1085,11 @@ bool qjs_runtime_drain_microtasks(struct QJSABIRuntime *rt, int max_microtasks_h
   int count = 0;
   while (max_microtasks_hint < 0 || count < max_microtasks_hint) {
     int err = JS_ExecutePendingJob(rt->rt, &pctx);
-    if (err <= 0) return err >= 0;
+    if (err < 0) {
+      record_js_exception(rt);
+      return false;
+    }
+    if (err == 0) return true;
     count++;
   }
   return true;
@@ -1478,9 +1497,7 @@ struct QJSABIValue qjs_function_call(
   for (size_t i = 0; i < arg_count; i++) JS_FreeValue(rt->ctx, js_args[i]);
   if (js_args != stack_args) free(js_args);
 
-  if (JS_IsException(res)) return return_js_error_val(rt);
-  drain_jobs_if_needed(rt);
-  return to_qjs_abi_value(rt, res);
+  return finish_top_level_call(rt, res);
 }
 
 struct QJSABIValue qjs_function_call_as_constructor(
@@ -1503,9 +1520,7 @@ struct QJSABIValue qjs_function_call_as_constructor(
   for (size_t i = 0; i < arg_count; i++) JS_FreeValue(rt->ctx, js_args[i]);
   if (js_args != stack_args) free(js_args);
 
-  if (JS_IsException(res)) return return_js_error_val(rt);
-  drain_jobs_if_needed(rt);
-  return to_qjs_abi_value(rt, res);
+  return finish_top_level_call(rt, res);
 }
 
 struct QJSABIFunctionOrError qjs_function_create_from_host(

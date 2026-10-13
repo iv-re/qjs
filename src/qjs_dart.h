@@ -224,6 +224,8 @@ struct QJSABIValueOrError qjs_object_from_id(
   uint64_t id
 );
 
+// Returns false and records the error if a job fails; the remaining jobs
+// stay queued.
 bool qjs_runtime_drain_microtasks(
   struct QJSABIRuntime *rt,
   int max_microtasks_hint

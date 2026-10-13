@@ -132,6 +132,18 @@ void main() {
       expect(retrievedNone, isNull);
     });
 
+    test('uniqueId of primitives', () {
+      int id(double n) => JSValue.number(rt, n).uniqueId;
+      expect(id(1.5), equals(id(1.5)));
+      expect(id(1), isNot(equals(id(2))));
+      expect(id(double.nan), equals(id(double.nan)));
+      expect(id(-1), isNot(equals(id(1))));
+      expect(
+        JSValue.boolean(rt, true).uniqueId,
+        isNot(equals(JSValue.boolean(rt, false).uniqueId)),
+      );
+    });
+
     test('mismatched type cast throws StateError', () {
       final vNum = JSValue.number(rt, 1);
       final vStr = JSValue.string(rt, 'abc');

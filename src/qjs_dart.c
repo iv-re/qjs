@@ -249,6 +249,13 @@ static const struct QJSABIManagedPointerVTable g_managed_vtable = {
   managed_pointer_invalidate
 };
 
+static void set_out_of_memory(struct QJSABIRuntime *rt) {
+  free(rt->last_native_exception);
+  rt->last_native_exception = strdup("out of memory");
+}
+
+// Takes ownership of val/atom. Returns NULL and records an "out of memory"
+// native exception if the wrapper cannot be allocated.
 static struct QJSABIManagedPointerImpl *create_managed(
   struct QJSABIRuntime *rt,
   JSValue val,
@@ -258,7 +265,17 @@ static struct QJSABIManagedPointerImpl *create_managed(
   if (rt) flush_pending_frees(rt);
   struct QJSABIManagedPointerImpl *impl =
     (struct QJSABIManagedPointerImpl *)malloc(sizeof(struct QJSABIManagedPointerImpl));
-  if (!impl) return NULL;
+  if (!impl) {
+    if (rt && rt->ctx) {
+      if (is_atom) {
+        JS_FreeAtom(rt->ctx, atom);
+      } else {
+        JS_FreeValue(rt->ctx, val);
+      }
+      set_out_of_memory(rt);
+    }
+    return NULL;
+  }
   impl->base.vtable = &g_managed_vtable;
   impl->rt = rt;
   if (is_atom) {
@@ -330,7 +347,9 @@ static uintptr_t return_ptr_or_error(struct QJSABIRuntime *rt, JSValue val) {
     record_js_exception(rt);
     return make_error_ptr(QJSABIErrorCodeJSError);
   }
-  return (uintptr_t)create_managed_pointer(rt, val);
+  struct QJSABIManagedPointerImpl *impl = create_managed_pointer(rt, val);
+  if (!impl) return make_error_ptr(QJSABIErrorCodeNativeException);
+  return (uintptr_t)impl;
 }
 
 static uintptr_t return_void_or_error(struct QJSABIRuntime *rt, int ret) {
@@ -400,6 +419,10 @@ static struct QJSABIValue to_qjs_abi_value(struct QJSABIRuntime *rt, JSValue val
     default:
       res.kind = QJSABIValueKindUndefined;
       break;
+  }
+  if ((res.kind & QJS_ABI_POINTER_MASK) && !res.data.pointer) {
+    res.kind = QJSABIValueKindError;
+    res.data.error = QJSABIErrorCodeNativeException;
   }
   return res;
 }
@@ -512,6 +535,7 @@ static JSValue host_object_get_property(
     struct QJSABIPropNameID propNameId = {
       .pointer = (struct QJSABIManagedPointer *)create_managed_atom(bridge->rt, JS_DupAtom(bridge->rt->ctx, atom))
     };
+    if (!propNameId.pointer) return JS_ThrowOutOfMemory(ctx);
     struct QJSABIValueOrError res = bridge->get_cb(bridge->user_data, bridge->rt, propNameId);
     qjs_pointer_release(propNameId.pointer);
     if (res.value.kind == QJSABIValueKindError) {
@@ -539,6 +563,10 @@ static int host_object_set_property(
     struct QJSABIPropNameID propNameId = {
       .pointer = (struct QJSABIManagedPointer *)create_managed_atom(bridge->rt, JS_DupAtom(bridge->rt->ctx, atom))
     };
+    if (!propNameId.pointer) {
+      JS_ThrowOutOfMemory(ctx);
+      return -1;
+    }
     struct QJSABIValue abiVal = to_qjs_abi_value(bridge->rt, JS_DupValue(bridge->rt->ctx, value));
     struct QJSABIVoidOrError res = bridge->set_cb(bridge->user_data, bridge->rt, propNameId, &abiVal);
     qjs_pointer_release(propNameId.pointer);
@@ -617,6 +645,12 @@ static int host_object_get_own_property_names(
     struct QJSABIPropNameIDList *list = (struct QJSABIPropNameIDList *)keysRes.ptr_or_error;
     if (list) {
       JSPropertyEnum *tab = (JSPropertyEnum *)js_malloc(ctx, sizeof(JSPropertyEnum) * (list->size > 0 ? list->size : 1));
+      if (!tab) {
+        if (list->vtable && list->vtable->release) list->vtable->release(list);
+        *ptab = NULL;
+        *plen = 0;
+        return -1;
+      }
       for (size_t i = 0; i < list->size; i++) {
         tab[i].is_enumerable = true;
         tab[i].atom = JS_DupAtom(ctx, get_js_atom(list->props[i].pointer));
@@ -692,6 +726,10 @@ static JSValue host_function_call(
   struct QJSABIValue *args = (argc <= MAX_STACK_ARGS)
     ? stack_args
     : (struct QJSABIValue *)calloc(argc, sizeof(struct QJSABIValue));
+  if (!args) {
+    release_value(&this_arg);
+    return JS_ThrowOutOfMemory(ctx);
+  }
 
   for (int i = 0; i < argc; i++) {
     args[i] = to_qjs_abi_value(b->rt, JS_DupValue(b->rt->ctx, argv[i]));
@@ -1108,7 +1146,15 @@ uint64_t qjs_value_get_unique_id(struct QJSABIRuntime *rt, struct QJSABIValue va
   if ((val.kind & QJS_ABI_POINTER_MASK) && val.data.pointer) {
     return (uint64_t)(uintptr_t)JS_VALUE_GET_PTR(get_js_value(val.data.pointer));
   }
-  return (uint64_t)val.kind ^ (uint64_t)val.data.number;
+  // Primitives: mix the kind with the payload bits. Casting the double
+  // directly would be undefined for NaN and out-of-range values.
+  uint64_t bits = 0;
+  if (val.kind == QJSABIValueKindNumber) {
+    memcpy(&bits, &val.data.number, sizeof(bits));
+  } else if (val.kind == QJSABIValueKindBoolean) {
+    bits = val.data.boolean ? 1 : 0;
+  }
+  return (uint64_t)(uint32_t)val.kind ^ bits;
 }
 
 struct QJSABIValueOrError qjs_object_from_id(struct QJSABIRuntime *rt, uint64_t id) {
@@ -1486,6 +1532,11 @@ struct QJSABIValue qjs_function_call(
   JSValue *js_args = (arg_count <= MAX_STACK_ARGS)
     ? stack_args
     : (JSValue *)calloc(arg_count, sizeof(JSValue));
+  if (!js_args) {
+    JS_FreeValue(rt->ctx, this_val);
+    JS_ThrowOutOfMemory(rt->ctx);
+    return return_js_error_val(rt);
+  }
 
   for (size_t i = 0; i < arg_count; i++) {
     js_args[i] = from_qjs_abi_value(rt, &args[i]);
@@ -1510,6 +1561,10 @@ struct QJSABIValue qjs_function_call_as_constructor(
   JSValue *js_args = (arg_count <= MAX_STACK_ARGS)
     ? stack_args
     : (JSValue *)calloc(arg_count, sizeof(JSValue));
+  if (!js_args) {
+    JS_ThrowOutOfMemory(rt->ctx);
+    return return_js_error_val(rt);
+  }
 
   for (size_t i = 0; i < arg_count; i++) {
     js_args[i] = from_qjs_abi_value(rt, &args[i]);
@@ -1622,7 +1677,8 @@ struct QJSABIPropNameIDOrError qjs_propnameid_create_from_string(
     res.ptr_or_error = make_error_ptr(QJSABIErrorCodeJSError);
     return res;
   }
-  res.ptr_or_error = (uintptr_t)create_managed_atom(rt, atom);
+  struct QJSABIManagedPointerImpl *impl = create_managed_atom(rt, atom);
+  res.ptr_or_error = impl ? (uintptr_t)impl : make_error_ptr(QJSABIErrorCodeNativeException);
   return res;
 }
 
@@ -1637,7 +1693,8 @@ struct QJSABIPropNameIDOrError qjs_propnameid_create_from_symbol(
     res.ptr_or_error = make_error_ptr(QJSABIErrorCodeJSError);
     return res;
   }
-  res.ptr_or_error = (uintptr_t)create_managed_atom(rt, atom);
+  struct QJSABIManagedPointerImpl *impl = create_managed_atom(rt, atom);
+  res.ptr_or_error = impl ? (uintptr_t)impl : make_error_ptr(QJSABIErrorCodeNativeException);
   return res;
 }
 

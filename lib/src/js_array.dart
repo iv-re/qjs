@@ -16,7 +16,7 @@ import 'package:qjs/src/js_value.dart';
 /// Example:
 /// ```dart
 /// final array = JSArray.create(rt)
-///   ..add(JSValue.number(42, rt: rt));
+///   ..add(JSValue.number(rt, 42));
 /// print(array[0].asNumber); // 42
 /// ```
 extension type JSArray(JSPointer jsPointer) implements Finalizable {

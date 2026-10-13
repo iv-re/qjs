@@ -32,7 +32,7 @@ enum JSValueType {
 ///
 /// Example:
 /// ```dart
-/// final num = JSValue.number(42, rt: rt);
+/// final num = JSValue.number(rt, 42);
 /// if (num.isNumber) {
 ///   print(num.asNumber); // 42.0
 /// }

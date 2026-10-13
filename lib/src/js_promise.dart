@@ -22,7 +22,7 @@ extension type JSPromise._(JSValue value) implements JSValue {
   /// Example:
   /// ```dart
   /// final (promise, resolve, reject) = JSPromise.withResolvers(rt);
-  /// resolve([JSValue.number(42, rt: rt)]);
+  /// resolve([JSValue.number(rt, 42)]);
   /// ```
   static PromiseWithResolvers withResolvers(JSRuntime rt) {
     final promiseFactory = rt.memoize(
@@ -55,7 +55,7 @@ extension type JSPromise._(JSValue value) implements JSValue {
   /// final fn = JSFunction.createFromHostFunction(rt, (rt, _, __) {
   ///   return JSPromise.fromAsyncFunction(rt, () async {
   ///     await Future.delayed(const Duration(seconds: 1));
-  ///     return JSValue.string('Result from Dart', rt: rt);
+  ///     return JSValue.string(rt, 'Result from Dart');
   ///   });
   /// });
   /// rt.global['fetchData'] = fn.asValue;

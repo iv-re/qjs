@@ -28,7 +28,7 @@ int _nextHostFunctionId = 1;
 /// Example:
 /// ```dart
 /// final fn = rt.evaluateJavascript('(a, b) => a + b').asFunctionOrNull!;
-/// final sum = fn([JSValue.number(1, rt: rt), JSValue.number(2, rt: rt)]);
+/// final sum = fn([JSValue.number(rt, 1), JSValue.number(rt, 2)]);
 /// ```
 extension type JSFunction(JSPointer jsPointer) implements Finalizable {
   /// Creates a JavaScript function that calls a Dart [fn].
@@ -42,7 +42,7 @@ extension type JSFunction(JSPointer jsPointer) implements Finalizable {
   ///   if (args.isEmpty) {
   ///     throw JSException(JSError.typeError(rt, 'Argument required'));
   ///   }
-  ///   return JSValue.string('Hello ${args[0].asString}', rt: rt);
+  ///   return JSValue.string(rt, 'Hello ${args[0].asDartString}');
   /// });
   /// ```
   factory JSFunction.createFromHostFunction(
@@ -105,7 +105,7 @@ extension type JSFunction(JSPointer jsPointer) implements Finalizable {
   /// ```dart
   /// final urlCtor = rt.global['URL'].asObject.asFunction;
   /// final url = urlCtor.callAsConstructor([
-  ///   JSValue.string('https://example.com', rt: rt),
+  ///   JSValue.string(rt, 'https://example.com'),
   /// ]);
   /// ```
   JSValue callAsConstructor([List<JSValue>? args]) {

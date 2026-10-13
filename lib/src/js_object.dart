@@ -18,15 +18,15 @@ import 'package:qjs/src/js_value.dart';
 ///   int count = 0;
 ///
 ///   @override
-///   JSValue get(JSRuntime rt, JSPropId name) {
+///   JSValue get(JSRuntime rt, JSPropNameId name) {
 ///     return switch (name.string) {
-///       'count' => JSValue.number(count.toDouble(), rt: rt),
-///       _ => JSValue.undefined(rt: rt),
+///       'count' => JSValue.number(rt, count.toDouble()),
+///       _ => JSValue.undefined(rt),
 ///     };
 ///   }
 ///
 ///   @override
-///   void set(JSRuntime rt, JSPropId name, JSValue value) {
+///   void set(JSRuntime rt, JSPropNameId name, JSValue value) {
 ///     if (name.string == 'count') {
 ///       if (!value.isNumber) {
 ///         throw JSNativeException('count must be a number');
@@ -36,8 +36,8 @@ import 'package:qjs/src/js_value.dart';
 ///   }
 ///
 ///   @override
-///   List<JSPropId> getPropertyNames(JSRuntime rt) => [
-///     JSPropId.fromString('count', rt: rt),
+///   List<JSPropNameId> getPropertyNames(JSRuntime rt) => [
+///     JSPropNameId.fromString(rt, 'count'),
 ///   ];
 /// }
 /// ```
@@ -75,8 +75,8 @@ int _nextNativeStateId = 1;
 /// Example:
 /// ```dart
 /// final obj = JSObject.create(rt);
-/// obj['key'] = JSValue.string('value', rt: rt);
-/// print(obj['key'].asString); // 'value'
+/// obj['key'] = JSValue.string(rt, 'value');
+/// print(obj['key'].asDartString); // 'value'
 /// ```
 extension type JSObject(JSPointer jsPointer) implements Finalizable {
   /// Creates a new empty object.
@@ -224,7 +224,7 @@ extension type JSObject(JSPointer jsPointer) implements Finalizable {
   /// ```dart
   /// obj.defineProperty(
   ///   'version',
-  ///   value: JSValue.string('1.0.0', rt: rt),
+  ///   value: JSValue.string(rt, '1.0.0'),
   ///   writable: false,
   /// );
   /// ```
@@ -235,7 +235,7 @@ extension type JSObject(JSPointer jsPointer) implements Finalizable {
   ///   'now',
   ///   get: JSFunction.createFromHostFunction(rt, (rt, _, __) {
   ///     final ms = DateTime.now().millisecondsSinceEpoch.toDouble();
-  ///     return JSValue.number(ms, rt: rt);
+  ///     return JSValue.number(rt, ms);
   ///   }),
   /// );
   /// ```

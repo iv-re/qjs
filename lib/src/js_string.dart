@@ -10,7 +10,7 @@ import 'package:qjs/src/utils.dart';
 ///
 /// Example:
 /// ```dart
-/// final jsStr = JSString.fromString('hello', rt: rt);
+/// final jsStr = JSString.fromString(rt, 'hello');
 /// print(jsStr.string); // 'hello'
 /// ```
 extension type JSString(JSPointer jsPointer) implements Finalizable {

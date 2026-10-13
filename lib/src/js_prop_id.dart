@@ -16,8 +16,8 @@ import 'package:qjs/src/utils.dart';
 ///
 /// Example:
 /// ```dart
-/// final propId = JSPropId.fromString('id', rt: rt);
-/// obj.setPropertyByPropId(propId, JSValue.number(1, rt: rt));
+/// final propId = JSPropNameId.fromString(rt, 'id');
+/// obj.setPropertyFromPropNameId(propId, JSValue.number(rt, 1));
 /// ```
 extension type JSPropNameId(JSPointer _pointer) implements Finalizable {
   /// Creates a property ID from a Dart [String].

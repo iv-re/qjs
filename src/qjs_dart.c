@@ -1160,6 +1160,22 @@ struct QJSABIObjectOrError qjs_object_create_from_host_object(
 }
 
 // Native state
+//
+// The state lives in the opaque of a holder object stored under a symbol
+// property that is neither writable nor configurable, so JS code cannot
+// replace or delete it. Setting the state again swaps the holder's opaque.
+
+// Returns the holder defined directly on obj (not inherited), JS_UNDEFINED if
+// there is none, or JS_EXCEPTION.
+static JSValue get_own_native_state_holder(struct QJSABIRuntime *rt, JSValueConst obj) {
+  JSPropertyDescriptor desc;
+  int ret = JS_GetOwnProperty(rt->ctx, &desc, obj, rt->native_state_atom);
+  if (ret < 0) return JS_EXCEPTION;
+  if (ret == 0) return JS_UNDEFINED;
+  JS_FreeValue(rt->ctx, desc.getter);
+  JS_FreeValue(rt->ctx, desc.setter);
+  return desc.value;
+}
 
 struct QJSABIVoidOrError qjs_object_set_native_state(
   struct QJSABIRuntime *rt,
@@ -1176,6 +1192,25 @@ struct QJSABIVoidOrError qjs_object_set_native_state(
   b->user_data = user_data;
   b->release_cb = release_cb;
 
+  JSValueConst target = get_js_value(obj.pointer);
+  JSValue holder = get_own_native_state_holder(rt, target);
+  if (JS_IsException(holder)) {
+    free(b);
+    if (release_cb) release_cb(user_data);
+    struct QJSABIVoidOrError res = { .void_or_error = return_void_or_error(rt, -1) };
+    return res;
+  }
+  QJSNativeStateBridge *old = (QJSNativeStateBridge *)JS_GetOpaque(holder, rt->native_state_class_id);
+  if (old) {
+    JS_SetOpaque(holder, b);
+    JS_FreeValue(rt->ctx, holder);
+    if (old->release_cb) old->release_cb(old->user_data);
+    free(old);
+    struct QJSABIVoidOrError res = { .void_or_error = 0 };
+    return res;
+  }
+  JS_FreeValue(rt->ctx, holder);
+
   JSValue ns_obj = JS_NewObjectClass(rt->ctx, rt->native_state_class_id);
   if (JS_IsException(ns_obj)) {
     free(b);
@@ -1186,19 +1221,21 @@ struct QJSABIVoidOrError qjs_object_set_native_state(
   // From here on b is owned by ns_obj: if the define fails, ns_obj is freed
   // and its finalizer calls release_cb.
   JS_SetOpaque(ns_obj, b);
-  int ret = JS_DefinePropertyValue(
-    rt->ctx, get_js_value(obj.pointer), rt->native_state_atom, ns_obj, JS_PROP_THROW
-  );
+  int ret = JS_DefinePropertyValue(rt->ctx, target, rt->native_state_atom, ns_obj, JS_PROP_THROW);
 
   struct QJSABIVoidOrError res = { .void_or_error = return_void_or_error(rt, ret) };
   return res;
 }
 
 void *qjs_object_get_native_state_data(struct QJSABIRuntime *rt, struct QJSABIObject obj) {
-  JSValue ns_obj = JS_GetProperty(rt->ctx, get_js_value(obj.pointer), rt->native_state_atom);
-  if (JS_IsException(ns_obj) || JS_IsUndefined(ns_obj)) return NULL;
-  QJSNativeStateBridge *b = (QJSNativeStateBridge *)JS_GetOpaque(ns_obj, rt->native_state_class_id);
-  JS_FreeValue(rt->ctx, ns_obj);
+  JSValue holder = get_own_native_state_holder(rt, get_js_value(obj.pointer));
+  if (JS_IsException(holder)) {
+    // Only a Proxy trap can throw here; report "no state" and drop the error.
+    JS_FreeValue(rt->ctx, JS_GetException(rt->ctx));
+    return NULL;
+  }
+  QJSNativeStateBridge *b = (QJSNativeStateBridge *)JS_GetOpaque(holder, rt->native_state_class_id);
+  JS_FreeValue(rt->ctx, holder);
   return b ? b->user_data : NULL;
 }
 

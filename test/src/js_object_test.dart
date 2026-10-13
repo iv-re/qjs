@@ -152,6 +152,32 @@ void main() {
       expect(propNames.length, equals(0));
     });
 
+    test('native state can be replaced', () {
+      final obj = JSObject.create(rt)
+        ..setNativeState('first')
+        ..setNativeState('second');
+      expect(obj.getNativeState(), equals('second'));
+    });
+
+    test('native state is not inherited', () {
+      final parent = JSObject.create(rt)..setNativeState('parent');
+      rt.global['parent'] = parent.asValue;
+      final child = rt.evaluateJavascript('Object.create(parent)').asObject;
+      expect(child.getNativeState(), isNull);
+    });
+
+    test('native state cannot be removed from JS', () {
+      final obj = JSObject.create(rt)..setNativeState('state');
+      rt.global['obj'] = obj.asValue;
+      rt.evaluateJavascript('''
+        for (const s of Object.getOwnPropertySymbols(obj)) {
+          try { obj[s] = {}; } catch (e) {}
+          try { delete obj[s]; } catch (e) {}
+        }
+      ''');
+      expect(obj.getNativeState(), equals('state'));
+    });
+
     test('native state on a frozen object throws', () {
       final obj = rt.evaluateJavascript('Object.freeze({})').asObject;
       expect(() => obj.setNativeState('state'), throwsA(isA<JSException>()));

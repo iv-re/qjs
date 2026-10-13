@@ -702,6 +702,54 @@ static JSValue js_disabled_eval(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_ThrowTypeError(ctx, "eval is disabled");
 }
 
+static JSValue js_disabled_function_constructor(
+  JSContext *ctx,
+  JSValueConst new_target,
+  int argc,
+  JSValueConst *argv
+) {
+  (void)new_target; (void)argc; (void)argv;
+  return JS_ThrowTypeError(ctx, "Function constructor is disabled");
+}
+
+// Replaces the constructor reachable through `proto.constructor` with one
+// that throws. It keeps `proto` as its prototype, so `instanceof` still works.
+static JSValue disable_function_constructor(JSContext *ctx, JSValueConst proto, const char *name) {
+  JSValue ctor = JS_NewCFunction2(
+    ctx, js_disabled_function_constructor, name, 1, JS_CFUNC_constructor_or_func, 0
+  );
+  JS_DefinePropertyValueStr(ctx, ctor, "prototype", JS_DupValue(ctx, proto), 0);
+  JS_DefinePropertyValueStr(
+    ctx, proto, "constructor", JS_DupValue(ctx, ctor), JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE
+  );
+  return ctor;
+}
+
+// Every function constructor compiles source code like eval does, so with
+// eval disabled they must go too. Besides the global Function, they are
+// reachable through the prototypes of async, generator and async generator
+// functions.
+static void disable_function_constructors(JSContext *ctx, JSValueConst global) {
+  JSValue function_ctor = JS_GetPropertyStr(ctx, global, "Function");
+  JSValue function_proto = JS_GetPropertyStr(ctx, function_ctor, "prototype");
+  JS_SetPropertyStr(ctx, global, "Function", disable_function_constructor(ctx, function_proto, "Function"));
+  JS_FreeValue(ctx, function_proto);
+  JS_FreeValue(ctx, function_ctor);
+
+  static const char protos_src[] =
+    "[Object.getPrototypeOf(async function () {}),"
+    " Object.getPrototypeOf(function* () {}),"
+    " Object.getPrototypeOf(async function* () {})]";
+  static const char *const names[] = { "AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction" };
+  JSValue protos = JS_Eval(ctx, protos_src, sizeof(protos_src) - 1, "<init>", JS_EVAL_TYPE_GLOBAL);
+  for (uint32_t i = 0; i < 3 && !JS_IsException(protos); i++) {
+    JSValue proto = JS_GetPropertyUint32(ctx, protos, i);
+    JS_FreeValue(ctx, disable_function_constructor(ctx, proto, names[i]));
+    JS_FreeValue(ctx, proto);
+  }
+  JS_FreeValue(ctx, protos);
+}
+
 struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
   struct QJSABIRuntime *rt = (struct QJSABIRuntime *)calloc(1, sizeof(struct QJSABIRuntime));
   if (!rt) return NULL;
@@ -733,6 +781,7 @@ struct QJSABIRuntime *qjs_runtime_create(struct QJSABIRuntimeConfig config) {
 
   if (!config.enable_eval) {
     JS_SetPropertyStr(rt->ctx, global, "eval", JS_NewCFunction(rt->ctx, js_disabled_eval, "eval", 1));
+    disable_function_constructors(rt->ctx, global);
   }
   if (!config.es6_proxy) {
     JSAtom proxy_atom = JS_NewAtom(rt->ctx, "Proxy");

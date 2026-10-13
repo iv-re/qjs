@@ -23,6 +23,58 @@ void main() {
       }
     });
 
+    test('hardened config disables every function constructor', () {
+      final rt = JSRuntime.create(const JSRuntimeConfig.hardened());
+      addTearDown(rt.release);
+
+      String run(String code) {
+        try {
+          rt.evaluateJavascript(code);
+          return 'ok';
+        } on JSException catch (e) {
+          return e.value.asObject['message'].asDartString;
+        }
+      }
+
+      const disabled = 'Function constructor is disabled';
+      expect(run('Function("return 1")()'), disabled);
+      expect(run('new Function("return 1")()'), disabled);
+      expect(run('(function () {}).constructor("return 1")()'), disabled);
+      expect(run('(async function () {}).constructor("return 1")'), disabled);
+      expect(run('(function* () {}).constructor("yield 1")'), disabled);
+      expect(run('(async function* () {}).constructor("yield 1")'), disabled);
+      expect(run('Reflect.construct(Function, ["return 1"])'), disabled);
+      expect(run('new (class extends Function {})("return 1")'), disabled);
+
+      bool check(String code) => rt.evaluateJavascript(code).asBoolean;
+      expect(check('(function () {}) instanceof Function'), isTrue);
+      expect(check('(() => 1) instanceof Function'), isTrue);
+      expect(check('(function () {}).constructor === Function'), isTrue);
+      expect(rt.evaluateJavascript('(async () => 42)(), 7').asNumber, 7);
+      expect(
+        rt
+            .evaluateJavascript(
+              '[...(function* () { yield 1; yield 2 })()].length',
+            )
+            .asNumber,
+        2,
+      );
+    });
+
+    test('enabled eval keeps function constructors working', () {
+      final rt = JSRuntime.create(const JSRuntimeConfig(enableEval: true));
+      addTearDown(rt.release);
+      expect(rt.evaluateJavascript('Function("return 40 + 2")()').asNumber, 42);
+      expect(
+        rt
+            .evaluateJavascript(
+              'typeof (async function () {}).constructor("return 1")',
+            )
+            .asDartString,
+        'function',
+      );
+    });
+
     test('custom config enables eval and proxy', () {
       const config = JSRuntimeConfig(
         enableEval: true,

@@ -1,3 +1,13 @@
+## 0.2.2
+
+### Features
+
+- ES modules:
+  - `JSRuntime.importModule` / `evaluateModule` import and evaluate modules and wait for their top-level `await`. `importModuleSync` / `evaluateModuleSync` return right away.
+  - `JSRuntime.moduleLoader` resolves and loads the modules JavaScript imports, including through `import()`. Imports stay disabled until it is set.
+  - `JSModules` serves host modules built from Dart values (`host`), files from a virtual file system (`mount`) and import-map-like aliases (`alias`).
+  - `with { type: 'json' }` and `with { type: 'text' }` import attributes are supported.
+
 ## 0.2.1
 
 ### Fixes

@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 import 'package:qjs/qjs.g.dart';
+import 'package:qjs/src/extensions/js_modules.dart';
 import 'package:qjs/src/js_error.dart';
+import 'package:qjs/src/js_function.dart';
+import 'package:qjs/src/js_module_loader.dart';
 import 'package:qjs/src/js_object.dart';
 import 'package:qjs/src/js_pointer.dart';
 import 'package:qjs/src/js_prepared_javascript.dart';
@@ -132,6 +136,169 @@ class JSRuntime implements Finalizable {
       prepared.ptr,
     );
     return JSValue.fromABI(this, result.value);
+  }
+
+  JSModuleLoader? _moduleLoader;
+
+  /// Resolves and loads the modules imported by JavaScript code, usually a
+  /// [JSModules]. Without one, which is the default, every import fails.
+  ///
+  /// Modules loaded through a previous loader stay cached.
+  JSModuleLoader? get moduleLoader => _moduleLoader;
+
+  set moduleLoader(JSModuleLoader? loader) {
+    qjs_runtime_set_module_loader(
+      ptr,
+      loader == null ? nullptr : moduleResolveFunction,
+      loader == null ? nullptr : moduleLoadFunction,
+    );
+    _moduleLoader = loader;
+  }
+
+  @internal
+  int moduleLoaderDepth = 0;
+
+  final Map<String, JSObject> _importedModules = {};
+
+  /// Evaluates [source] as a module named [name] and returns its namespace,
+  /// the object `import * as ns` gives, once its top-level `await` is done.
+  ///
+  /// Its imports go through [moduleLoader], relative to [name]. Like an
+  /// inline `<script type="module">`, every call evaluates [source] again,
+  /// unlike [importModule]. QuickJS never unloads modules, so each call
+  /// keeps its module in memory until [release]; prefer [importModule] or
+  /// [evaluateJavascript] for code that runs repeatedly.
+  ///
+  /// Once evaluated, the module is what later imports of [name] get, in
+  /// place of the module [moduleLoader] would load.
+  ///
+  /// Completes with a [JSException] if the module fails to load or throws.
+  /// With `microtaskQueue` enabled, the module only progresses while
+  /// [drainMicrotasks] runs. If the runtime is released first, the future
+  /// never completes.
+  Future<JSObject> evaluateModule(
+    String source, {
+    String name = 'module.js',
+  }) async {
+    final (namespace, promise) = _evaluateModule(source, name);
+    return _waitForNamespace(namespace, promise, name);
+  }
+
+  /// Same as [evaluateModule], but returns right away.
+  ///
+  /// Throws a [StateError] if the module's top-level `await` is still
+  /// waiting, for example on a Dart future.
+  JSObject evaluateModuleSync(String source, {String name = 'module.js'}) {
+    final (namespace, promise) = _evaluateModule(source, name);
+    return _settledNamespace(namespace, promise, name);
+  }
+
+  /// Imports the module [name] through [moduleLoader] and returns its
+  /// namespace, like `import * as ns from name`.
+  ///
+  /// A module is loaded and evaluated once: later imports of the same
+  /// canonical name, here or from JavaScript, reuse it.
+  ///
+  /// Completes like [evaluateModule].
+  Future<JSObject> importModule(String name) async {
+    final cached = _importedModules[name];
+    if (cached != null) return cached;
+
+    final (namespace, promise) = _evaluateModule(_importSource(name), '');
+    final imported = await _waitForNamespace(namespace, promise, name);
+    return _importedModules[name] = imported['default'].asObject;
+  }
+
+  /// Same as [importModule], but returns right away. Throws like
+  /// [evaluateModuleSync].
+  JSObject importModuleSync(String name) {
+    final cached = _importedModules[name];
+    if (cached != null) return cached;
+
+    final (namespace, promise) = _evaluateModule(_importSource(name), '');
+    return _importedModules[name] = _settledNamespace(
+      namespace,
+      promise,
+      name,
+    )['default'].asObject;
+  }
+
+  // A module importing [name] relative to an empty referrer.
+  static String _importSource(String name) =>
+      'import * as ns from ${jsonEncode(name)};\nexport default ns;\n';
+
+  (JSValue, JSValue) _evaluateModule(String source, String name) {
+    if (moduleLoaderDepth > 0) {
+      throw StateError(
+        'Cannot evaluate a module while the module loader is running.',
+      );
+    }
+    return using((arena) {
+      final nativeSource = source.toNativeUtf8(allocator: arena);
+      final nativeName = name.toNativeUtf8(allocator: arena);
+      final outPromise = arena<QJSABIValue>();
+      final result = qjs_runtime_evaluate_module(
+        ptr,
+        nativeSource.cast(),
+        nativeSource.length,
+        nativeName.cast(),
+        outPromise,
+      );
+      final namespace = JSValue.fromABI(this, result.value);
+      // Copied out of the arena, which is freed on return.
+      final promise = Struct.create<QJSABIValue>()
+        ..kind = outPromise.ref.kind
+        ..data.pointer = outPromise.ref.data.pointer;
+      return (namespace, JSValue.fromABI(this, promise));
+    });
+  }
+
+  JSObject _settledNamespace(JSValue namespace, JSValue promise, String name) {
+    final state = qjs_promise_get_state(ptr, promise.asObject.ptr);
+    return switch (state) {
+      .QJSABIPromiseStateFulfilled => namespace.asObject,
+      .QJSABIPromiseStateRejected => throw JSException(
+        JSValue.fromABI(
+          this,
+          qjs_promise_get_result(ptr, promise.asObject.ptr),
+        ),
+      ),
+      _ => throw StateError(
+        "Module '$name' is still evaluating: its top-level await is "
+        'waiting. Use the async variant to wait for it.',
+      ),
+    };
+  }
+
+  Future<JSObject> _waitForNamespace(
+    JSValue namespace,
+    JSValue promise,
+    String name,
+  ) {
+    final state = qjs_promise_get_state(ptr, promise.asObject.ptr);
+    if (state != .QJSABIPromiseStatePending) {
+      return Future.sync(() => _settledNamespace(namespace, promise, name));
+    }
+
+    final completer = Completer<JSObject>();
+    final onFulfilled = JSFunction.createFromHostFunction(this, (rt, _, _) {
+      completer.complete(namespace.asObject);
+      return .undefined(rt);
+    });
+    final onRejected = JSFunction.createFromHostFunction(this, (rt, _, args) {
+      completer.completeError(
+        JSException(args.isEmpty ? .undefined(rt) : args.first.retain()),
+      );
+      return .undefined(rt);
+    });
+    final result = qjs_promise_then(
+      ptr,
+      promise.asObject.ptr,
+      onFulfilled.ptr,
+      onRejected.ptr,
+    );
+    unwrapVoid(result.void_or_error);
+    return completer.future;
   }
 
   /// Interrupts JavaScript execution once [timeout] has passed from now.
@@ -273,6 +440,7 @@ class JSRuntime implements Finalizable {
   void release() {
     if (_released) return;
     _memoizedCache.clear();
+    _importedModules.clear();
     _finalizer.detach(this);
     _runtimesRegistry.remove(_ptr.address);
     _released = true;

@@ -169,6 +169,43 @@ script.release();
 
 ---
 
+## ES Modules
+
+Imports are disabled until a `moduleLoader` is set. `JSModules` serves host modules built from Dart values and files from your own virtual file system; the bridge never reads the disk:
+
+```dart
+final files = {
+  'main.js': '''
+    import * as alloy from 'alloy';
+    import { greet } from '@lib/greet.js';
+    import config from './config.json' with { type: 'json' };
+    export const message = greet(alloy.version, config.name);
+  ''',
+  'lib/greet.js': r'export const greet = (v, n) => `${n} v${v}`;',
+  'config.json': '{"name": "alloy"}',
+};
+
+rt.moduleLoader = JSModules()
+  ..host('alloy', (rt) => {'version': .string(rt, '1.0.0')})
+  ..mount('/app', (path) => files[path])
+  ..alias('@lib/', '/app/lib/');
+
+final ns = await rt.importModule('/app/main.js');
+print(ns['message'].asDartString); // alloy v1.0.0
+```
+
+- `host(name, exports)` serves a bare specifier. `exports` runs on the first import. To export a class, write it in JavaScript on top of the host functions.
+- `mount(prefix, read)` serves paths under `prefix`. `read` gets the path relative to `prefix` and returns the file's contents, or `null` if there is no such file.
+- `alias(specifier, target)` maps a bare specifier to a path or a host module. A specifier ending with `/` maps a whole prefix, like `'@lib/'` → `'/app/lib/'`.
+
+Paths resolve like URLs relative to the importing module, never above `/`, and are exact: no extension or `index.js` is added. `import x from './a.txt' with { type: 'text' }` and `with { type: 'json' }` are supported; as in browsers, a `.json` file imported without `type: 'json'` is compiled as JavaScript.
+
+`evaluateModule(source, name: ...)` evaluates a module from source. A module is loaded once per runtime, and later imports reuse it. Both methods wait for the module's top-level `await`; `importModuleSync` / `evaluateModuleSync` return right away and throw a `StateError` if it is still waiting, for example on a Dart future.
+
+For other resolution rules, implement `JSModuleLoader` directly. Loading is synchronous because QuickJS resolves imports while it compiles a module, so load asynchronous sources such as Flutter assets up front.
+
+---
+
 ## JavaScript Values
 
 `JSValue` is a handle to a native JavaScript value.

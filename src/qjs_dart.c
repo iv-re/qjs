@@ -75,6 +75,23 @@ typedef struct QJSPendingFree {
   struct QJSPendingFree *next;
 } QJSPendingFree;
 
+typedef struct QJSRejectionEvent {
+  JSValue promise;
+  JSValue reason;
+  bool is_handled;
+  struct QJSRejectionEvent *next;
+} QJSRejectionEvent;
+
+static void free_rejection_events(JSContext *ctx, QJSRejectionEvent *ev) {
+  while (ev) {
+    QJSRejectionEvent *next = ev->next;
+    JS_FreeValue(ctx, ev->promise);
+    JS_FreeValue(ctx, ev->reason);
+    free(ev);
+    ev = next;
+  }
+}
+
 struct QJSABIRuntime {
   JSRuntime *rt;
   JSContext *ctx;
@@ -99,6 +116,12 @@ struct QJSABIRuntime {
   uint64_t deadline_us;
   qjs_atomic_flag_t interrupt_requested;
   QJSABIPromiseRejectionTracker rejection_tracker;
+  // While a module evaluates, rejections are held back until it is known
+  // which of them belong to its own evaluation promise.
+  int rejection_buffer_depth;
+  QJSRejectionEvent *buffered_rejections;
+  QJSABIModuleResolve module_resolve;
+  QJSABIModuleLoad module_load;
   // Registry of live runtimes, guarded by g_live_runtimes_lock, so that
   // qjs_runtime_request_interrupt never touches a released runtime.
   uint64_t id;
@@ -941,6 +964,9 @@ void qjs_runtime_release(struct QJSABIRuntime *rt) {
 
   free_pending_list(rt->ctx, pfree);
 
+  free_rejection_events(rt->ctx, rt->buffered_rejections);
+  rt->buffered_rejections = NULL;
+
   if (!JS_IsUndefined(rt->last_js_error)) {
     JS_FreeValue(rt->ctx, rt->last_js_error);
     rt->last_js_error = JS_UNDEFINED;
@@ -1017,9 +1043,61 @@ static void promise_rejection_tracker(
 ) {
   struct QJSABIRuntime *rt = (struct QJSABIRuntime *)opaque;
   if (!rt->rejection_tracker) return;
+  if (rt->rejection_buffer_depth > 0) {
+    // A rejection handled before the module finishes evaluating, like its
+    // own evaluation promise, is not reported at all.
+    if (is_handled) {
+      for (QJSRejectionEvent **link = &rt->buffered_rejections; *link; link = &(*link)->next) {
+        QJSRejectionEvent *ev = *link;
+        if (!ev->is_handled && JS_VALUE_GET_PTR(ev->promise) == JS_VALUE_GET_PTR(promise)) {
+          *link = ev->next;
+          ev->next = NULL;
+          free_rejection_events(ctx, ev);
+          return;
+        }
+      }
+    }
+    QJSRejectionEvent *ev = (QJSRejectionEvent *)malloc(sizeof(QJSRejectionEvent));
+    if (ev) {
+      ev->promise = JS_DupValue(ctx, promise);
+      ev->reason = JS_DupValue(ctx, reason);
+      ev->is_handled = is_handled;
+      ev->next = NULL;
+      QJSRejectionEvent **tail = &rt->buffered_rejections;
+      while (*tail) tail = &(*tail)->next;
+      *tail = ev;
+      return;
+    }
+  }
   struct QJSABIValue abi_promise = to_qjs_abi_value(rt, JS_DupValue(ctx, promise));
   struct QJSABIValue abi_reason = to_qjs_abi_value(rt, JS_DupValue(ctx, reason));
   rt->rejection_tracker(rt, abi_promise, abi_reason, is_handled);
+}
+
+// Once no module is evaluating any more, reports the held back rejections in
+// order.
+static void end_rejection_buffer(struct QJSABIRuntime *rt) {
+  if (--rt->rejection_buffer_depth > 0) return;
+
+  QJSRejectionEvent *ev = rt->buffered_rejections;
+  rt->buffered_rejections = NULL;
+  while (ev) {
+    QJSRejectionEvent *next = ev->next;
+    if (rt->rejection_tracker) {
+      // The tracker receives owned references.
+      rt->rejection_tracker(
+        rt,
+        to_qjs_abi_value(rt, ev->promise),
+        to_qjs_abi_value(rt, ev->reason),
+        ev->is_handled
+      );
+    } else {
+      JS_FreeValue(rt->ctx, ev->promise);
+      JS_FreeValue(rt->ctx, ev->reason);
+    }
+    free(ev);
+    ev = next;
+  }
 }
 
 void qjs_runtime_set_promise_rejection_tracker(
@@ -1033,6 +1111,294 @@ void qjs_runtime_set_promise_rejection_tracker(
 void qjs_runtime_run_gc(struct QJSABIRuntime *rt) {
   flush_pending_frees(rt);
   JS_RunGC(rt->rt);
+}
+
+// Modules
+
+static char *module_normalize(
+  JSContext *ctx,
+  const char *base_name,
+  const char *name,
+  void *opaque
+) {
+  struct QJSABIRuntime *rt = (struct QJSABIRuntime *)opaque;
+  struct QJSABIValueOrError res = rt->module_resolve(rt, name, base_name);
+  if (res.value.kind == QJSABIValueKindError) {
+    raise_abi_error(rt, ctx, res.value.data.error);
+    return NULL;
+  }
+  JSValue val = from_qjs_abi_value(rt, &res.value);
+  release_value(&res.value);
+  if (!JS_IsString(val)) {
+    JS_FreeValue(ctx, val);
+    JS_ThrowTypeError(ctx, "module resolver must return a string");
+    return NULL;
+  }
+  const char *str = JS_ToCString(ctx, val);
+  JS_FreeValue(ctx, val);
+  if (!str) return NULL;
+  char *out = js_strdup(ctx, str);
+  JS_FreeCString(ctx, str);
+  return out;
+}
+
+// Returns a QJSABIImportType, or -1 with a pending exception.
+static int module_import_type(JSContext *ctx, JSValueConst attributes) {
+  if (!JS_IsObject(attributes)) return QJSABIImportTypeJavaScript;
+  JSValue type = JS_GetPropertyStr(ctx, attributes, "type");
+  if (JS_IsException(type)) return -1;
+  if (JS_IsUndefined(type)) return QJSABIImportTypeJavaScript;
+  const char *str = JS_ToCString(ctx, type);
+  JS_FreeValue(ctx, type);
+  if (!str) return -1;
+  int res;
+  if (strcmp(str, "json") == 0) {
+    res = QJSABIImportTypeJSON;
+  } else if (strcmp(str, "text") == 0) {
+    res = QJSABIImportTypeText;
+  } else {
+    JS_ThrowTypeError(ctx, "unsupported import type '%s'", str);
+    res = -1;
+  }
+  JS_FreeCString(ctx, str);
+  return res;
+}
+
+static int module_check_attributes(JSContext *ctx, void *opaque, JSValueConst attributes) {
+  (void)opaque;
+  JSPropertyEnum *tab;
+  uint32_t len;
+  if (JS_GetOwnPropertyNames(ctx, &tab, &len, attributes, JS_GPN_ENUM_ONLY | JS_GPN_STRING_MASK)) {
+    return -1;
+  }
+  int ret = 0;
+  for (uint32_t i = 0; i < len && ret == 0; i++) {
+    const char *key = JS_AtomToCString(ctx, tab[i].atom);
+    if (!key) {
+      ret = -1;
+    } else {
+      if (strcmp(key, "type") != 0) {
+        JS_ThrowSyntaxError(ctx, "import attribute '%s' is not supported", key);
+        ret = -1;
+      }
+      JS_FreeCString(ctx, key);
+    }
+  }
+  JS_FreePropertyEnum(ctx, tab, len);
+  if (ret == 0 && module_import_type(ctx, attributes) < 0) ret = -1;
+  return ret;
+}
+
+// Compiles `source`, which must be NUL-terminated, and resolves its imports.
+// Returns the module value or JS_EXCEPTION.
+static JSValue compile_module(JSContext *ctx, const char *source, size_t length, const char *name) {
+  JSValue val = JS_Eval(ctx, source, length, name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(val)) return val;
+  JSValue meta = JS_GetImportMeta(ctx, (JSModuleDef *)JS_VALUE_GET_PTR(val));
+  if (JS_IsException(meta)) {
+    JS_FreeValue(ctx, val);
+    return JS_EXCEPTION;
+  }
+  JS_DefinePropertyValueStr(ctx, meta, "url", JS_NewString(ctx, name), JS_PROP_C_W_E);
+  JS_FreeValue(ctx, meta);
+  return val;
+}
+
+// The private value of an exports module is [name0, value0, name1, ...].
+static int exports_module_init(JSContext *ctx, JSModuleDef *m) {
+  JSValue exports = JS_GetModulePrivateValue(ctx, m);
+  int64_t len = 0;
+  int ret = JS_GetLength(ctx, exports, &len);
+  for (int64_t i = 0; ret == 0 && i + 1 < len; i += 2) {
+    JSValue key = JS_GetPropertyInt64(ctx, exports, i);
+    const char *name = JS_ToCString(ctx, key);
+    JS_FreeValue(ctx, key);
+    if (!name) {
+      ret = -1;
+      break;
+    }
+    ret = JS_SetModuleExport(ctx, m, name, JS_GetPropertyInt64(ctx, exports, i + 1));
+    JS_FreeCString(ctx, name);
+  }
+  JS_FreeValue(ctx, exports);
+  JS_SetModulePrivateValue(ctx, m, JS_UNDEFINED);
+  return ret;
+}
+
+// Takes ownership of `obj`. Its properties are read up front: once the module
+// exists it cannot be removed, so nothing may fail after creating it.
+static JSModuleDef *create_exports_module(JSContext *ctx, const char *name, JSValue obj) {
+  JSPropertyEnum *tab;
+  uint32_t len;
+  if (JS_GetOwnPropertyNames(ctx, &tab, &len, obj, JS_GPN_ENUM_ONLY | JS_GPN_STRING_MASK)) {
+    JS_FreeValue(ctx, obj);
+    return NULL;
+  }
+  JSValue exports = JS_NewArray(ctx);
+  bool failed = JS_IsException(exports);
+  for (uint32_t i = 0; i < len && !failed; i++) {
+    JSValue value = JS_GetProperty(ctx, obj, tab[i].atom);
+    failed = JS_IsException(value) ||
+      JS_SetPropertyInt64(ctx, exports, 2 * (int64_t)i, JS_AtomToString(ctx, tab[i].atom)) < 0 ||
+      JS_SetPropertyInt64(ctx, exports, 2 * (int64_t)i + 1, value) < 0;
+  }
+  JS_FreeValue(ctx, obj);
+
+  JSModuleDef *m = failed ? NULL : JS_NewCModule(ctx, name, exports_module_init);
+  for (uint32_t i = 0; m && i < len; i++) {
+    const char *export_name = JS_AtomToCString(ctx, tab[i].atom);
+    if (export_name) {
+      JS_AddModuleExport(ctx, m, export_name);
+      JS_FreeCString(ctx, export_name);
+    }
+  }
+  JS_FreePropertyEnum(ctx, tab, len);
+  if (m) {
+    JS_SetModulePrivateValue(ctx, m, exports);
+  } else {
+    JS_FreeValue(ctx, exports);
+  }
+  return m;
+}
+
+static JSModuleDef *module_loader(
+  JSContext *ctx,
+  const char *name,
+  void *opaque,
+  JSValueConst attributes
+) {
+  struct QJSABIRuntime *rt = (struct QJSABIRuntime *)opaque;
+  int type = module_import_type(ctx, attributes);
+  if (type < 0) return NULL;
+
+  struct QJSABIValueOrError res = rt->module_load(rt, name, (enum QJSABIImportType)type);
+  if (res.value.kind == QJSABIValueKindError) {
+    raise_abi_error(rt, ctx, res.value.data.error);
+    return NULL;
+  }
+  JSValue val = from_qjs_abi_value(rt, &res.value);
+  release_value(&res.value);
+
+  if (JS_IsString(val)) {
+    size_t length;
+    const char *source = JS_ToCStringLen(ctx, &length, val);
+    JS_FreeValue(ctx, val);
+    if (!source) return NULL;
+    JSValue module = compile_module(ctx, source, length, name);
+    JS_FreeCString(ctx, source);
+    if (JS_IsException(module)) return NULL;
+    // The context keeps the module alive.
+    JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(module);
+    JS_FreeValue(ctx, module);
+    return m;
+  }
+  if (JS_IsObject(val)) return create_exports_module(ctx, name, val);
+
+  JS_FreeValue(ctx, val);
+  JS_ThrowTypeError(ctx, "module loader must return a string or an object");
+  return NULL;
+}
+
+void qjs_runtime_set_module_loader(
+  struct QJSABIRuntime *rt,
+  QJSABIModuleResolve resolve,
+  QJSABIModuleLoad load
+) {
+  rt->module_resolve = resolve;
+  rt->module_load = load;
+  if (resolve && load) {
+    JS_SetModuleLoaderFunc2(rt->rt, module_normalize, module_loader, module_check_attributes, rt);
+  } else {
+    JS_SetModuleLoaderFunc2(rt->rt, NULL, NULL, NULL, NULL);
+  }
+}
+
+struct QJSABIValueOrError qjs_runtime_evaluate_module(
+  struct QJSABIRuntime *rt,
+  const uint8_t *utf8_source,
+  size_t source_length,
+  const char *name,
+  struct QJSABIValue *out_promise
+) {
+  memset(out_promise, 0, sizeof(*out_promise));
+  out_promise->kind = QJSABIValueKindUndefined;
+  struct QJSABIValueOrError res;
+
+  JSValue module = compile_module(
+    rt->ctx, (const char *)utf8_source, source_length, name ? name : "<module>"
+  );
+  if (JS_IsException(module)) {
+    res.value = return_js_error_val(rt);
+    return res;
+  }
+  JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(module);
+
+  // A module that throws rejects its evaluation promise before anything can
+  // handle it, which would be reported as an unhandled rejection.
+  rt->rejection_buffer_depth++;
+  JSValue promise = JS_EvalFunction(rt->ctx, module);
+  if (JS_IsException(promise)) {
+    res.value = return_js_error_val(rt);
+    end_rejection_buffer(rt);
+    return res;
+  }
+  JS_PromiseMarkAsHandled(rt->ctx, promise);
+  end_rejection_buffer(rt);
+
+  JSValue ns = JS_GetModuleNamespace(rt->ctx, m);
+  if (JS_IsException(ns)) {
+    JS_FreeValue(rt->ctx, promise);
+    res.value = return_js_error_val(rt);
+    return res;
+  }
+  if (drain_jobs_if_needed(rt) < 0) {
+    JS_FreeValue(rt->ctx, promise);
+    JS_FreeValue(rt->ctx, ns);
+    res.value = return_js_error_val(rt);
+    return res;
+  }
+  *out_promise = to_qjs_abi_value(rt, promise);
+  res.value = to_qjs_abi_value(rt, ns);
+  return res;
+}
+
+// Promises
+
+enum QJSABIPromiseState qjs_promise_get_state(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise
+) {
+  return (enum QJSABIPromiseState)JS_PromiseState(rt->ctx, get_js_value(promise.pointer));
+}
+
+struct QJSABIValue qjs_promise_get_result(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise
+) {
+  return to_qjs_abi_value(rt, JS_PromiseResult(rt->ctx, get_js_value(promise.pointer)));
+}
+
+struct QJSABIVoidOrError qjs_promise_then(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise,
+  struct QJSABIFunction on_fulfilled,
+  struct QJSABIFunction on_rejected
+) {
+  struct QJSABIVoidOrError res;
+  JSValue derived = JS_PromiseThen(
+    rt->ctx,
+    get_js_value(promise.pointer),
+    get_js_value(on_fulfilled.pointer),
+    get_js_value(on_rejected.pointer)
+  );
+  if (JS_IsException(derived)) {
+    res.void_or_error = return_void_or_error(rt, -1);
+    return res;
+  }
+  JS_FreeValue(rt->ctx, derived);
+  // A settled promise queues its reactions right away.
+  res.void_or_error = return_void_or_error(rt, drain_jobs_if_needed(rt));
+  return res;
 }
 
 struct QJSABIObject qjs_runtime_get_global_object(struct QJSABIRuntime *rt) {

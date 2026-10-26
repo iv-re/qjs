@@ -163,6 +163,38 @@ typedef void (*QJSABIPromiseRejectionTracker)(
   bool is_handled
 );
 
+// The `type` import attribute: `import x from 'a.json' with { type: 'json' }`.
+enum QJSABIImportType {
+  QJSABIImportTypeJavaScript = 0,
+  QJSABIImportTypeJSON = 1,
+  QJSABIImportTypeText = 2,
+};
+
+// Returns the canonical name (a string) of `specifier` imported from
+// `referrer`, the name of the importing module or script.
+typedef struct QJSABIValueOrError (*QJSABIModuleResolve)(
+  struct QJSABIRuntime *rt,
+  const char *specifier,
+  const char *referrer
+);
+
+// Returns the module with the canonical `name`: a string is compiled as its
+// source, and an object becomes a module exporting its own enumerable
+// properties. Called once per name and import type.
+typedef struct QJSABIValueOrError (*QJSABIModuleLoad)(
+  struct QJSABIRuntime *rt,
+  const char *name,
+  enum QJSABIImportType type
+);
+
+// Mirrors JSPromiseStateEnum.
+enum QJSABIPromiseState {
+  QJSABIPromiseStateNotAPromise = -1,
+  QJSABIPromiseStatePending = 0,
+  QJSABIPromiseStateFulfilled = 1,
+  QJSABIPromiseStateRejected = 2,
+};
+
 // Mirrors JSMemoryUsage.
 struct QJSABIMemoryUsage {
   int64_t malloc_size, malloc_limit, memory_used_size;
@@ -302,6 +334,46 @@ void qjs_runtime_set_promise_rejection_tracker(
 );
 
 void qjs_runtime_run_gc(struct QJSABIRuntime *rt);
+
+// Modules
+
+// Pass NULL for both to disable imports, which is the default.
+void qjs_runtime_set_module_loader(
+  struct QJSABIRuntime *rt,
+  QJSABIModuleResolve resolve,
+  QJSABIModuleLoad load
+);
+
+// Evaluates `source` as a module named `name` and returns its namespace.
+// The promise of its evaluation, already marked as handled, is stored in
+// `out_promise`: a module with top-level await may still be evaluating.
+struct QJSABIValueOrError qjs_runtime_evaluate_module(
+  struct QJSABIRuntime *rt,
+  const uint8_t *utf8_source,
+  size_t source_length,
+  const char *name,
+  struct QJSABIValue *out_promise
+);
+
+// Promises
+
+enum QJSABIPromiseState qjs_promise_get_state(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise
+);
+
+struct QJSABIValue qjs_promise_get_result(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise
+);
+
+// Unlike calling `promise.then`, never runs a `then` overridden by scripts.
+struct QJSABIVoidOrError qjs_promise_then(
+  struct QJSABIRuntime *rt,
+  struct QJSABIObject promise,
+  struct QJSABIFunction on_fulfilled,
+  struct QJSABIFunction on_rejected
+);
 
 struct QJSABIObject qjs_runtime_get_global_object(
   struct QJSABIRuntime *rt

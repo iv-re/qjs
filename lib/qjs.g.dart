@@ -391,6 +391,47 @@ external void qjs_preparedjavascript_release(
   ffi.Pointer<QJSABIPreparedJavaScript> prepared,
 );
 
+@ffi.Native<QJSABIValue Function(ffi.Pointer<QJSABIRuntime>, QJSABIObject)>()
+external QJSABIValue qjs_promise_get_result(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIObject promise,
+);
+
+@ffi.Native<ffi.Int Function(ffi.Pointer<QJSABIRuntime>, QJSABIObject)>(
+  symbol: 'qjs_promise_get_state',
+)
+external int _qjs_promise_get_state(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIObject promise,
+);
+
+QJSABIPromiseState qjs_promise_get_state(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIObject promise,
+) {
+  return QJSABIPromiseState.fromValue(
+    _qjs_promise_get_state(
+      rt,
+      promise,
+    ),
+  );
+}
+
+@ffi.Native<
+  QJSABIVoidOrError Function(
+    ffi.Pointer<QJSABIRuntime>,
+    QJSABIObject,
+    QJSABIFunction,
+    QJSABIFunction,
+  )
+>()
+external QJSABIVoidOrError qjs_promise_then(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIObject promise,
+  QJSABIFunction on_fulfilled,
+  QJSABIFunction on_rejected,
+);
+
 @ffi.Native<
   QJSABIPropNameID Function(ffi.Pointer<QJSABIRuntime>, QJSABIPropNameID)
 >()
@@ -482,6 +523,23 @@ external bool qjs_runtime_drain_microtasks(
   int max_microtasks_hint,
 );
 
+@ffi.Native<
+  QJSABIValueOrError Function(
+    ffi.Pointer<QJSABIRuntime>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Size,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<QJSABIValue>,
+  )
+>()
+external QJSABIValueOrError qjs_runtime_evaluate_module(
+  ffi.Pointer<QJSABIRuntime> rt,
+  ffi.Pointer<ffi.Uint8> utf8_source,
+  int source_length,
+  ffi.Pointer<ffi.Char> name,
+  ffi.Pointer<QJSABIValue> out_promise,
+);
+
 @ffi.Native<QJSABIValue Function(ffi.Pointer<QJSABIRuntime>)>()
 external QJSABIValue qjs_runtime_get_and_clear_js_error_value(
   ffi.Pointer<QJSABIRuntime> rt,
@@ -560,6 +618,19 @@ external void qjs_runtime_set_deadline(
 external void qjs_runtime_set_js_error_value(
   ffi.Pointer<QJSABIRuntime> rt,
   QJSABIValue error_value,
+);
+
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<QJSABIRuntime>,
+    QJSABIModuleResolve,
+    QJSABIModuleLoad,
+  )
+>()
+external void qjs_runtime_set_module_loader(
+  ffi.Pointer<QJSABIRuntime> rt,
+  QJSABIModuleResolve resolve,
+  QJSABIModuleLoad load,
 );
 
 @ffi.Native<
@@ -775,6 +846,22 @@ typedef QJSABIHostObjectSetFunction = QJSABIVoidOrError Function(
   ffi.Pointer<QJSABIValue> value,
 );
 
+enum QJSABIImportType {
+  QJSABIImportTypeJavaScript(0),
+  QJSABIImportTypeJSON(1),
+  QJSABIImportTypeText(2);
+
+  final int value;
+  const QJSABIImportType(this.value);
+
+  static QJSABIImportType fromValue(int value) => switch (value) {
+    0 => QJSABIImportTypeJavaScript,
+    1 => QJSABIImportTypeJSON,
+    2 => QJSABIImportTypeText,
+    _ => throw ArgumentError('Unknown value for QJSABIImportType: $value'),
+  };
+}
+
 final class QJSABIManagedPointer extends ffi.Struct {
   external ffi.Pointer<QJSABIManagedPointerVTable> vtable;
 
@@ -939,6 +1026,25 @@ final class QJSABIMemoryUsage extends ffi.Struct {
     ..ref.binary_object_size = binary_object_size;
 }
 
+typedef QJSABIModuleLoad =
+    ffi.Pointer<ffi.NativeFunction<QJSABIModuleLoadFunction>>;
+typedef QJSABIModuleLoadFunction = QJSABIValueOrError Function(
+  ffi.Pointer<QJSABIRuntime> rt,
+  ffi.Pointer<ffi.Char> name,
+  ffi.UnsignedInt type,
+);
+typedef DartQJSABIModuleLoadFunction = QJSABIValueOrError Function(
+  ffi.Pointer<QJSABIRuntime> rt,
+  ffi.Pointer<ffi.Char> name,
+  QJSABIImportType type,
+);
+typedef QJSABIModuleResolve =
+    ffi.Pointer<ffi.NativeFunction<QJSABIModuleResolveFunction>>;
+typedef QJSABIModuleResolveFunction = QJSABIValueOrError Function(
+  ffi.Pointer<QJSABIRuntime> rt,
+  ffi.Pointer<ffi.Char> specifier,
+  ffi.Pointer<ffi.Char> referrer,
+);
 typedef QJSABIMutableBufferRelease =
     ffi.Pointer<ffi.NativeFunction<QJSABIMutableBufferReleaseFunction>>;
 typedef QJSABIMutableBufferReleaseFunction = ffi.Void Function(
@@ -1003,6 +1109,24 @@ typedef DartQJSABIPromiseRejectionTrackerFunction = void Function(
   QJSABIValue reason,
   bool is_handled,
 );
+
+enum QJSABIPromiseState {
+  QJSABIPromiseStateNotAPromise(-1),
+  QJSABIPromiseStatePending(0),
+  QJSABIPromiseStateFulfilled(1),
+  QJSABIPromiseStateRejected(2);
+
+  final int value;
+  const QJSABIPromiseState(this.value);
+
+  static QJSABIPromiseState fromValue(int value) => switch (value) {
+    -1 => QJSABIPromiseStateNotAPromise,
+    0 => QJSABIPromiseStatePending,
+    1 => QJSABIPromiseStateFulfilled,
+    2 => QJSABIPromiseStateRejected,
+    _ => throw ArgumentError('Unknown value for QJSABIPromiseState: $value'),
+  };
+}
 
 final class QJSABIPropNameID extends ffi.Struct {
   external ffi.Pointer<QJSABIManagedPointer> pointer;

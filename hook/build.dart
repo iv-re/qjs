@@ -109,7 +109,9 @@ Future<Uri?> _tryDownloadPrebuiltBinary({
     if (expectedSha256 == null) return null;
 
     final cacheDir = Directory.fromUri(
-      input.outputDirectoryShared.resolve('prebuilt_cache/$hash/'),
+      input.outputDirectoryShared.resolve(
+        'prebuilt_cache/$hash/$configuration/',
+      ),
     );
     await cacheDir.create(recursive: true);
 

@@ -1,3 +1,9 @@
+## 0.2.3
+
+### Fixes
+
+- Prebuilt binaries are cached per target. An iOS build no longer bundles a binary downloaded for macOS.
+
 ## 0.2.2
 
 ### Features
